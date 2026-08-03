@@ -1,0 +1,31 @@
+# Ce qui est liste ici n'est meme pas envoye au daemon Docker : contexte de
+# build plus leger, et aucun risque de faire fuiter un secret dans une couche.
+
+# Le piege classique : sans cette ligne, COPY . . ecrase le node_modules
+# fraichement installe par celui de l'hote, potentiellement compile pour un
+# autre OS ou une autre architecture.
+node_modules
+npm-debug.log*
+
+.git
+.gitignore
+.github
+
+# Les secrets ne rentrent jamais dans une image, meme supprimes dans une couche
+# ulterieure : `docker history` les retrouverait.
+.env
+.env.*
+!.env.example
+
+Dockerfile*
+.dockerignore
+docker-compose*.yml
+
+# Le service Python a son propre contexte de build (stats_api/Dockerfile).
+stats_api
+
+tests
+coverage
+*.log
+*.md
+.DS_Store
