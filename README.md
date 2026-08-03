@@ -359,3 +359,92 @@ en 200. Le service est donc plus robuste que prévu sur ce point — l'état inc
 apparaît comme clé supplémentaire au lieu de faire tomber la requête. À garder en
 tête tout de même : un client qui suppose exactement trois clés dans la réponse
 serait pris au dépourvu.
+
+## Chapitre 9 — Publier les images et redéployer
+
+### Le registry retenu, et pourquoi
+
+Premier essai sur **GHCR** (GitHub Container Registry), puisque le dépôt est déjà
+sur GitHub. Le `docker login ghcr.io` réussit avec le token de la CLI `gh`, mais
+le push échoue :
+
+```
+error from registry: permission_denied: The token provided does not match expected scopes.
+```
+
+Le token de `gh auth` porte `repo`, `workflow`, `read:org` — pas `write:packages`,
+qui est le scope exigé pour publier un package. Un `gh auth refresh -s write:packages`
+le corrigerait, mais demande une validation navigateur.
+
+J'ai donc pris la seconde option que le TP autorise explicitement (« un registry
+public ou privé ») : un **registry privé local**, l'image officielle `registry:2`.
+
+```bash
+docker run -d --name tp-registry --restart unless-stopped \
+  -p 127.0.0.1:5000:5000 registry:2
+```
+
+Le `-p 127.0.0.1:5000:5000` n'est pas cosmétique : un `-p 5000:5000` exposerait un
+registry **sans authentification** sur toutes les interfaces de la machine.
+Publier sur la loopback uniquement le rend joignable par le daemon Docker local,
+et par personne d'autre.
+
+### Tag et push
+
+```bash
+docker tag  todo-todo-api:latest  localhost:5000/gabrielsaint-louis/todo-api:1.0.0
+docker tag  todo-stats-api:latest localhost:5000/gabrielsaint-louis/stats-api:1.0.0
+docker push localhost:5000/gabrielsaint-louis/todo-api:1.0.0
+docker push localhost:5000/gabrielsaint-louis/stats-api:1.0.0
+```
+
+Le registry confirme :
+
+```
+{"repositories":["gabrielsaint-louis/stats-api","gabrielsaint-louis/todo-api"]}
+{"name":"gabrielsaint-louis/todo-api","tags":["1.0.0"]}
+```
+
+Aucune image n'est poussée en `latest`, volontairement : sur un registry partagé,
+`latest` change de contenu à chaque push sans qu'aucune version ne le distingue
+du précédent. `1.0.0` est le seul moyen de savoir ce qui tourne réellement.
+
+`docker-compose.prod.yml` ne référence le registry qu'à travers `${IMAGE_PREFIX}`.
+Basculer vers Docker Hub ou GHCR, le jour où les identifiants sont disponibles, ne
+demande de changer qu'une ligne du `.env` — pas le fichier compose.
+
+### Le test qui compte
+
+Dans `/tmp/deploy-depuis-registry`, un dossier ne contenant **que**
+`docker-compose.prod.yml` et `.env`, après suppression de toutes les images
+locales de l'application :
+
+```
+docker compose -f docker-compose.prod.yml up -d      →  7,5 s
+```
+
+| Service | Image | État |
+| --- | --- | --- |
+| `db` | `postgres:16-alpine` | `Up (healthy)` |
+| `todo-api` | `localhost:5000/gabrielsaint-louis/todo-api:1.0.0` | `Up (healthy)` |
+| `stats-api` | `localhost:5000/gabrielsaint-louis/stats-api:1.0.0` | `Up` |
+| `adminer` | `adminer:4.8.1` | `Up` |
+
+`POST /api/tasks` crée une tâche, `GET /api/tasks` la renvoie, `/stats` compte
+`{"todo":0,"in_progress":0,"done":1}`, Adminer répond 200. Pas une ligne de code
+source sur la machine. C'est le *build once, deploy everywhere* rendu concret.
+
+### Cas adverse : un secret dans une couche ?
+
+`docker history --no-trunc` sur les deux images publiées, filtré sur
+`password|secret|token|todo_pass` :
+
+- `todo-api` : **0 occurrence** ;
+- `stats-api` : **1 occurrence**, qui est un faux positif —
+  `RUN adduser --disabled-password --gecos "" appuser`, la ligne du Dockerfile
+  fourni par le TP qui crée l'utilisateur non-root. Le mot « password » y apparaît
+  comme nom d'option, pas comme valeur.
+
+Aucun `.env`, aucune valeur de mot de passe, aucun jeton dans l'historique des
+deux images. Ce que le `.dockerignore` de chaque service garantissait en amont,
+`docker history` le confirme en aval.
