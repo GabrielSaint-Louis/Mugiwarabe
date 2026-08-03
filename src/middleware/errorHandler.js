@@ -23,6 +23,16 @@ function errorHandler(err, req, res, next) {
     return res.status(err.status).json({ error: err.message });
   }
 
+  // Base injoignable : ce n'est pas un bug applicatif, c'est une dependance
+  // absente. On le distingue par un 503, qui dit au client "reessaie plus tard"
+  // la ou un 500 dirait "le serveur est casse". Sans ce cas, une coupure de
+  // Postgres ressortirait en 500 opaque.
+  const DB_DOWN = ['ECONNREFUSED', 'ENOTFOUND', 'ETIMEDOUT', 'EAI_AGAIN', '57P01', '57P03'];
+  if (DB_DOWN.includes(err.code) || /timeout expired|Connection terminated/i.test(err.message)) {
+    console.error('[db] injoignable :', err.message);
+    return res.status(503).json({ error: 'base de donnees injoignable, reessayez plus tard' });
+  }
+
   // Tout le reste est un bug de notre cote : on loggue, on repond 500 sobre.
   console.error('[error]', err.stack || err);
   return res.status(500).json({ error: 'erreur interne du serveur' });
