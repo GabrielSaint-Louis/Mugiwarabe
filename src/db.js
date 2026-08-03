@@ -1,25 +1,23 @@
 'use strict';
 
 const { Pool } = require('pg');
+const config = require('./config');
 
 // ---------------------------------------------------------------------------
-// Chapitre 6, Mission B : plus aucune IP dans le code.
+// Chapitre 7, Mission A : plus une seule valeur en dur ici.
 //
-// `host` est desormais le NOM du conteneur Postgres. Il n'est resolvable que
-// parce que les deux conteneurs partagent un network custom (todo-network), ou
-// Docker fait tourner un DNS interne. Sur le bridge par defaut, ce meme nom ne
-// resout rien du tout : il fallait y coller l'IP relevee au docker inspect, qui
-// change a chaque recreation du conteneur.
-//
-// Les identifiants, eux, sont encore en dur : c'est le chapitre 7 qui les
-// sortira du code via dotenv.
+// Le chapitre 6 avait d'abord une IP (`172.17.0.2`), puis un nom de conteneur
+// (`todo-postgres`) ecrits directement dans ce fichier, avec les identifiants a
+// cote. Tout vient maintenant de la configuration, donc du .env, qui n'est
+// jamais commite. Le meme code tourne en dev, en staging et en prod : seules
+// les variables changent.
 // ---------------------------------------------------------------------------
 const pool = new Pool({
-  host: 'todo-postgres',
-  port: 5432,
-  user: 'todo_user',
-  password: 'todo_pass',
-  database: 'todo_db',
+  host: config.db.host,
+  port: config.db.port,
+  user: config.db.user,
+  password: config.db.password,
+  database: config.db.name,
   // Sans ce timeout, une base injoignable laisse la requete HTTP pendante
   // indefiniment cote client au lieu de renvoyer une erreur exploitable.
   connectionTimeoutMillis: 3000,
