@@ -3,18 +3,19 @@
 const { Pool } = require('pg');
 
 // ---------------------------------------------------------------------------
-// Chapitre 6, Mission A : la configuration est EN DUR, volontairement.
+// Chapitre 6, Mission B : plus aucune IP dans le code.
 //
-// `host` est l'IP interne du conteneur Postgres, relevee a la main avec :
-//   docker inspect todo-postgres --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}'
+// `host` est desormais le NOM du conteneur Postgres. Il n'est resolvable que
+// parce que les deux conteneurs partagent un network custom (todo-network), ou
+// Docker fait tourner un DNS interne. Sur le bridge par defaut, ce meme nom ne
+// resout rien du tout : il fallait y coller l'IP relevee au docker inspect, qui
+// change a chaque recreation du conteneur.
 //
-// Cette IP est attribuee par le bridge par defaut, ou aucun nom n'est resolu.
-// Elle change a chaque recreation du conteneur : c'est precisement la fragilite
-// que la Mission B corrige avec un network custom, et que le chapitre 7 sortira
-// completement du code.
+// Les identifiants, eux, sont encore en dur : c'est le chapitre 7 qui les
+// sortira du code via dotenv.
 // ---------------------------------------------------------------------------
 const pool = new Pool({
-  host: '172.17.0.2',
+  host: 'todo-postgres',
   port: 5432,
   user: 'todo_user',
   password: 'todo_pass',
