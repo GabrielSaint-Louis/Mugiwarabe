@@ -127,3 +127,95 @@ tout l'historique du dépôt, lisible par quiconque récupère l'image.
 multi-stage ajoute un étage à évaluer, même entièrement caché. C'est une
 régression réelle sur cette métrique, assumée : elle achète l'absence de cache npm
 et de devDependencies dans l'image finale.
+
+## Chapitre 6 — Networks et Volumes
+
+### Mission A — la persistance
+
+La commande exacte qui lance Postgres, à la main :
+
+```bash
+docker volume create todo-pgdata
+docker run -d --name todo-postgres \
+  -e POSTGRES_DB=todo_db \
+  -e POSTGRES_USER=todo_user \
+  -e POSTGRES_PASSWORD=todo_pass \
+  -v todo-pgdata:/var/lib/postgresql/data \
+  postgres:16-alpine
+```
+
+**IP interne trouvée** : `172.17.0.2`, sur le réseau `bridge` par défaut, relevée avec
+`docker inspect todo-postgres --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}'`.
+Cette IP a dû être écrite en dur dans `src/db.js`, puisque sur le bridge par défaut
+`getent hosts todo-postgres` ne résout rien du tout.
+
+**Le nombre d'étapes manuelles.** Pour obtenir deux conteneurs qui se parlent :
+`docker volume create`, puis un `docker run` de 6 lignes pour Postgres, puis un
+`docker inspect` pour lire l'IP, puis une **modification du code source** pour y
+coller cette IP, puis un `docker build`, puis un `docker run` pour l'API. Six
+étapes, dont une qui touche au code applicatif — et tout est à refaire dès que le
+conteneur Postgres est recréé, puisque l'IP change. Un seul fichier déclaratif
+ferait la même chose sans qu'on ait à lire quoi que ce soit à la main.
+
+**Les trois tests de persistance.**
+
+| Scénario | Résultat |
+| --- | --- |
+| `docker stop` puis `docker start` de Postgres | tâche toujours présente |
+| `docker rm` puis un conteneur **tout neuf** sur le même volume | tâche toujours présente |
+| `docker volume rm` sur un volume jetable (`todo-logs`) | 0 fichier retrouvé, données perdues pour de bon |
+
+La troisième ligne est celle qui compte : elle situe exactement la frontière entre
+« je change de conteneur » et « je perds mes données ».
+
+**Cas adverse : la base tuée en pleine écriture.** `docker kill todo-postgres`
+pendant un `POST` renvoie `503 {"error":"base de donnees injoignable, reessayez
+plus tard"}` en **3,0 s** — exactement le `connectionTimeoutMillis` fixé dans le
+pool. L'API reste vivante (`/health` répond), et se reconnecte seule au
+`docker start` sans redémarrage.
+
+**Ce qui a cassé.** Premier essai : `docker kill` sur Postgres tuait aussi le
+process Node. Un client inactif du pool `pg` émet un événement `error` sur le pool
+quand la connexion tombe ; sans handler `pool.on('error')`, Node traite ça comme
+une exception non gérée et termine le process. L'API entière disparaissait parce
+que la base avait redémarré. Deuxième point : sans `connectionTimeoutMillis`, la
+requête restait pendante indéfiniment côté client au lieu de renvoyer une erreur.
+
+### Mission B — l'isolation réseau
+
+```bash
+docker network create todo-network
+```
+
+Nom retenu : **`todo-network`**. `src/db.js` vise maintenant `host: 'todo-postgres'`,
+le nom du conteneur, résolu par le DNS interne du network custom
+(`getent hosts todo-postgres` → `172.18.0.2`). Plus une seule IP dans le code.
+Postgres est lancé sans `-p` : `docker port todo-postgres` ne renvoie rien.
+
+**Ce qui a cassé : la vérification elle-même.** Le TP propose de vérifier
+l'isolation avec `psql -h localhost -U todo_user -d todo_db`, ou à défaut
+`nc -zv localhost 5432`. Sur cette machine, `nc` répond **`succeeded`** — et
+pourtant l'isolation est correcte. La raison : un PostgreSQL système tourne déjà
+sur `127.0.0.1:5432`, sans rapport avec le TP. Le test tombe sur lui.
+
+Un test de port ne prouve donc rien tout seul dès que la machine héberge déjà le
+même service. Quatre vérifications ont remplacé celle-là :
+
+| Vérification | Résultat |
+| --- | --- |
+| `docker port todo-postgres` | sortie vide, aucun port publié |
+| `ss -tlnp \| grep 5432` | un seul `LISTEN` sur `127.0.0.1`, aucun `docker-proxy` |
+| `psql -h localhost -U todo_user` | `FATAL: password authentication failed` → c'est le Postgres système, pas le nôtre |
+| depuis un conteneur **sur** `todo-network` | `connexion ok depuis todo-network, 1 tache(s)` |
+| depuis un conteneur **hors** du network | `could not translate host name "todo-postgres"` |
+
+Les deux dernières lignes sont le vrai test : un contrôle positif et un contrôle
+négatif. Sans le contrôle positif, un test qui échoue ne dit pas si l'isolation
+fonctionne ou si la commande est simplement mal écrite.
+
+**Exercices guidés.** Le ping par nom entre `serveur` et `client` sur
+`app-network` passe (`172.18.0.2`, 0% packet loss) ; le même ping vers `isole`,
+placé sur `other-network`, échoue avec `ping: bad address 'isole'`. Le volume
+`todo-logs` a bien survécu à la suppression de `todo-writer` et `todo-reader`,
+relu tel quel par un `todo-checker` créé après coup, et vit sur l'hôte dans
+`/var/lib/docker/volumes/todo-logs/_data`.
