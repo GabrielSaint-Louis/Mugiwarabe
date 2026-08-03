@@ -21,12 +21,60 @@ Une API REST qui manipule des `Task`. Chaque tâche porte un `id` (UUID), une
 | `PUT`    | `/api/tasks/:id`      | Modifier une tâche          |
 | `DELETE` | `/api/tasks/:id`      | Supprimer une tâche         |
 
+La stack complète compte quatre services : l'API Node.js, une base PostgreSQL,
+un service Python `stats-api` qui compte les tâches par état, et Adminer pour
+inspecter la base à la souris.
+
+| Service     | Rôle                                | Port hôte (par défaut) |
+| ----------- | ----------------------------------- | ---------------------- |
+| `todo-api`  | l'API REST Node.js                  | `${API_PORT}` → 3000   |
+| `db`        | PostgreSQL 16                       | **aucun**, volontairement |
+| `stats-api` | statistiques par état (FastAPI)     | `${STATS_PORT}` → 8000 |
+| `adminer`   | interface web d'admin de la base    | `${ADMINER_PORT}` → 8080 |
+
 ## Lancer le projet
 
+### Depuis les sources
+
 ```bash
-docker build -t todo-api:1.0.0 .
-docker run --rm -p 3000:3000 todo-api:1.0.0
-curl http://localhost:3000/health
+cp .env.example .env        # puis renseigner DB_PASSWORD
+docker compose up -d
+```
+
+Toute la stack démarre en une commande. Les ports publiés sont pilotés par le
+`.env` : sur une machine où 3000 est déjà pris, il suffit d'y écrire
+`API_PORT=8080`, sans toucher ni à l'image ni au fichier compose.
+
+```bash
+curl http://localhost:${API_PORT:-3000}/health
+curl http://localhost:${API_PORT:-3000}/api/tasks
+curl http://localhost:${STATS_PORT:-8000}/stats
+```
+
+### Depuis le registry, sans le code source
+
+Le vrai test de la séparation build / run. Dans un dossier vide contenant
+uniquement `docker-compose.prod.yml` et un `.env` :
+
+```bash
+docker compose -f docker-compose.prod.yml up -d
+```
+
+### Publier de nouvelles images
+
+```bash
+docker compose build
+docker tag  todo-todo-api:latest  $IMAGE_PREFIX/todo-api:1.0.0
+docker tag  todo-stats-api:latest $IMAGE_PREFIX/stats-api:1.0.0
+docker push $IMAGE_PREFIX/todo-api:1.0.0
+docker push $IMAGE_PREFIX/stats-api:1.0.0
+```
+
+### Mesurer
+
+```bash
+./scripts/measure.sh todo-api  .           http://127.0.0.1:8080/health
+./scripts/measure.sh stats-api ./stats_api http://127.0.0.1:8081/health
 ```
 
 ## Structure
@@ -35,15 +83,23 @@ curl http://localhost:3000/health
 tp-devops-todo-api/
 ├── src/
 │    ├── routes/tasks.js          # les 5 routes REST
-│    ├── models/task.js           # stockage + validation des entrées
+│    ├── models/task.js           # accès base + validation des entrées
 │    ├── middleware/errorHandler.js
-│    ├── app.js                   # câblage express
-│    └── server.js                # démarrage + arrêt propre sur SIGTERM
+│    ├── db.js                    # pool PostgreSQL + création du schéma
+│    ├── config.js                # point unique de lecture de l'environnement
+│    └── app.js                   # câblage express
+├── stats_api/                    # le service Python
+│    ├── main.py
+│    ├── requirements.txt
+│    └── Dockerfile
+├── scripts/measure.sh            # les 4 métriques du chapitre 10
 ├── tests/                        # plus tard dans la semaine
 ├── Dockerfile                    # image de production
 ├── Dockerfile.simple             # le brouillon, gardé comme référence de mesure
-├── .dockerignore
-└── package.json
+├── docker-compose.yml            # stack de dev, construite depuis les sources
+├── docker-compose.prod.yml       # stack de prod, tirée du registry
+├── .env.example                  # template commité (le .env, jamais)
+└── .dockerignore
 ```
 
 ---
@@ -448,3 +504,130 @@ source sur la machine. C'est le *build once, deploy everywhere* rendu concret.
 Aucun `.env`, aucune valeur de mot de passe, aucun jeton dans l'historique des
 deux images. Ce que le `.dockerignore` de chaque service garantissait en amont,
 `docker history` le confirme en aval.
+
+## Chapitre 10 — Mesurer et optimiser
+
+Les mesures ne sont pas relevées à la main : `scripts/measure.sh` enchaîne
+`docker builder prune -af`, un build à froid, un build à chaud, la lecture des
+tailles et des couches, puis une boucle `curl` toutes les 100 ms jusqu'au premier
+200. Une mesure qu'on ne peut pas rejouer n'est pas une mesure.
+
+### Le tableau
+
+| Image | Taille | Couches (poids max) | Build froid / chaud | Temps 1re réponse HTTP |
+| --- | --- | --- | --- | --- |
+| `todo-api` | **149,4 Mo** <br><sub>48,7 Mo au `pull` · 198 Mo sur disque</sub> | 18 <br><sub>la plus lourde : **129,0 Mo**</sub> | 6,24 s / **1,00 s** | **0,68 s** |
+| `stats-api` | **165,2 Mo** <br><sub>53,5 Mo au `pull` · 219 Mo sur disque</sub> | 21 <br><sub>la plus lourde : **85,2 Mo**</sub> | 8,73 s / **0,48 s** | **1,56 s** |
+
+Les deux cibles du TP sont tenues : `todo-api` sous 150 Mo (149,4) avec un build
+à chaud sous 5 s (1,00 s), `stats-api` sous 180 Mo (165,2).
+
+**Ce que la colonne « poids max » révèle, et que la taille totale cache.** Sur
+`todo-api`, une seule couche pèse 129,0 Mo sur les 149,4 : c'est le runtime Node
+de l'image de base. Tout le code applicatif, dépendances comprises, tient dans
+4,8 Mo. Autrement dit, **86 % de l'image ne m'appartient pas** et aucune
+optimisation de mon Dockerfile n'y touchera. Sur `stats-api`, la plus grosse
+couche est le `pip install` (85,2 Mo) : là, il y a matière.
+
+### Trois optimisations tentées, trois résultats
+
+**1. Retirer npm de l'image finale de `todo-api`** — `RUN rm -rf /usr/local/lib/node_modules/npm`
+avant le `USER node`. npm ne sert à rien au runtime.
+
+> **Régression.** 48 661 820 → 48 662 525 octets, soit **+705 octets**. `which npm`
+> répond bien « absent », mais les fichiers restent intégralement dans la couche
+> inférieure : un `rm` dans un Dockerfile n'efface rien, il ajoute une couche de
+> masquage de 24,6 ko. Une couche de plus (18 → 19), et zéro octet gagné. C'est
+> exactement le mécanisme qui fait qu'un `COPY .env` suivi d'un `RUN rm .env`
+> laisse le secret lisible dans `docker history`. Abandonné.
+
+**2. Passer `stats-api` en multi-stage** — un étage `builder` avec
+`pip install --prefix=/install`, puis `COPY --from=builder /install /usr/local`.
+
+> **Gain nul.** 53 526 345 → 53 526 263 octets, soit **−82 octets** (0,0002 %).
+> Une couche de moins (21 → 20), et c'est tout. La raison : `--no-cache-dir` était
+> déjà là, donc il n'y avait aucun cache pip à jeter, et ce service n'a aucune
+> étape de compilation. Le multi-stage paie quand il y a des outils de build à
+> laisser derrière soi ; ici il n'y en a pas. Abandonné, parce qu'un Dockerfile
+> plus complexe pour 82 octets est une mauvaise affaire.
+
+**3. `pip install --no-compile` sur `stats-api`** — ne pas pré-compiler les `.pyc`
+à l'installation.
+
+> **Gain réel, coût réel.** 165,2 → **159,4 Mo** (−5,8 Mo, −3,5 %), content size
+> 53,5 → 51,6 Mo. Mais le temps jusqu'à la première réponse passe de **1,36 s à
+> 1,75 s**, soit **+29 %** : sans `.pyc` sur disque et avec
+> `PYTHONDONTWRITEBYTECODE=1` qui empêche de les écrire au premier import, Python
+> recompile les sources **à chaque démarrage du conteneur**.
+>
+> **Rejetée.** Le TP pose comme critère de validation que « le temps de démarrage
+> n'a pas régressé par rapport à la mesure précédente ». Celle-ci le fait franchir
+> de 29 % pour économiser 5,8 Mo, alors que la cible de 180 Mo était déjà tenue
+> avec 15 Mo de marge. Payer une régression de démarrage pour un objectif déjà
+> atteint n'a pas de sens. Elle redeviendrait intéressante le jour où la
+> contrainte serait la taille — un registry facturé au Go, ou des pulls très
+> fréquents sur une liaison lente.
+
+Bilan : les deux Dockerfiles sont restés tels quels. Trois tentatives, aucune
+retenue, mais chacune chiffrée — c'est la différence entre « j'ai optimisé » et
+« j'ai mesuré ».
+
+### Le coût du build à froid dans une pipeline
+
+Une pipeline qui construit ces deux images 50 fois par jour :
+
+| | Par build | × 50 / jour |
+| --- | --- | --- |
+| À froid (`--no-cache`) | 14,97 s | **12 min 29 s** |
+| À chaud (cache chaud) | 1,48 s | **1 min 14 s** |
+
+**11 min 15 s de calcul économisées par jour**, uniquement grâce à l'ordre des
+instructions du Dockerfile — les manifestes copiés avant le code source. Sur un
+mois de jours ouvrés, environ 4 heures. C'est ce qui transforme le cache de build
+d'un détail de confort en sujet d'optimisation sérieux.
+
+### Jusqu'où compresser avant que l'image devienne indébuggable ?
+
+Le compromis a été tranché à **« l'image garde un shell »**. Les images
+distroless descendraient plus bas et réduiraient la surface d'attaque, mais elles
+n'embarquent pas `sh`. Or trois des cinq vérifications du chapitre 5 passent
+par un shell dans le conteneur — `docker run --rm mon-image sh -c whoami`,
+`ls -a`, `ls node_modules | grep -c jest` — et le diagnostic du chapitre 6 s'est
+fait avec `docker exec`. Une image sans shell aurait rendu la moitié de cette
+journée impossible à instrumenter. Sur un service en production, avec du
+monitoring externe et des logs centralisés, l'arbitrage pencherait dans l'autre
+sens.
+
+### Le test qui rejoue toute la journée
+
+Dossier neuf, `docker-compose.prod.yml` et un `.env` **reconstruit à partir de
+`.env.example`**, images tirées du registry, aucun code source.
+
+| Étape | Attendu | Obtenu |
+| --- | --- | --- |
+| Démarrage | 4 services up | `db (healthy)`, `todo-api (healthy)`, `stats-api`, `adminer` |
+| `POST` sans champ obligatoire | refusé proprement | `400 {"error":"description est obligatoire"}`, `/health` toujours 200 |
+| `5432` depuis l'hôte | injoignable | `docker compose port db` → aucun port publié |
+| `/stats` vs `COUNT` manuel | identiques | `{"todo":3,"in_progress":0,"done":1}` vs `{"todo":3,"done":1}` en SQL |
+| `db` tué en pleine charge | dégradation propre | `todo-api` → 503 en 3,00 s · `stats-api` → 503 en 0,005 s · les deux `/health` à 200 · reprise automatique après `start` |
+
+Une seule ligne mérite un mot : `/stats` renvoie `in_progress: 0` là où le
+`COUNT` SQL n'a **aucune ligne** pour cet état. Ce n'est pas un écart, c'est le
+`KNOWN_STATUSES` du code Python qui pré-remplit les trois compteurs à zéro. Un
+client peut donc toujours lire `.in_progress` sans tester son existence — ce qui
+est précisément l'intérêt de cette liste en dur.
+
+---
+
+## Ce qui reste ouvert
+
+- **Les images ne sont publiées que sur un registry privé local.** Le token de la
+  CLI `gh` n'a pas le scope `write:packages` (voir chapitre 9). Un
+  `gh auth refresh -h github.com -s write:packages` puis un changement de la
+  ligne `IMAGE_PREFIX` du `.env` suffiraient à basculer sur GHCR — le
+  `docker-compose.prod.yml` n'a pas à bouger.
+- **`tests/` est vide.** Le TP l'annonce pour plus tard dans la semaine ; les
+  scénarios validés aujourd'hui l'ont été à la main via `curl`, et sont
+  reproduits dans ce journal.
+- **Aucune limite de ressources** (`deploy.resources.limits`) n'est posée sur les
+  services : sujet du jour 2.
