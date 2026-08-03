@@ -309,3 +309,53 @@ reessayez plus tard"}` en **3,0 s** (le `connectionTimeoutMillis` du pool).
 `/health` continue de répondre 200 : le conteneur n'est pas mort avec sa base.
 Après `docker compose start db`, l'API **retrouve seule** le chemin de la base,
 sans redémarrage — le pool `pg` rouvre une connexion au premier appel suivant.
+
+## Chapitre 8 — Le service Python stats-api
+
+Pas une ligne de Python à écrire : `main.py` et `requirements.txt` sont repris
+tels quels du TP. Tout le travail était dans le branchement, et il s'est trouvé
+que les deux points d'attention annoncés ne demandaient aucune correction :
+
+- `TABLE_NAME = "tasks"` et `STATUS_COLUMN = "status"` correspondent déjà au
+  schéma créé au chapitre 6 ;
+- les clés lues par `get_connection()` (`DB_HOST`, `DB_PORT`, `DB_NAME`,
+  `DB_USER`, `DB_PASSWORD`) sont exactement celles du `.env` du chapitre 7.
+
+Ce n'est pas de la chance : le schéma du chapitre 6 et les noms de variables du
+chapitre 7 ont été choisis en lisant d'abord ce que le chapitre 8 allait
+attendre. C'est le seul « travail de réflexion » réel du chapitre, et il a été
+fait deux chapitres plus tôt.
+
+Deux ajouts au Dockerfile fourni : la base est épinglée au patch
+(`python:3.12.8-slim` plutôt que `python:3.12-slim`), par cohérence avec la règle
+du chapitre 5, et un `stats_api/.dockerignore` a été ajouté — le `COPY . .` du
+Dockerfile donné embarquerait sinon `__pycache__` et tout `.env` local.
+
+`docker network inspect todo-network` liste bien les quatre conteneurs :
+`todo-db-1`, `todo-todo-api-1`, `todo-stats-api-1`, `todo-adminer-1`.
+
+### Checklist de sortie
+
+| Cas | Attendu | Obtenu |
+| --- | --- | --- |
+| Nominal | compteurs = contenu réel de la table | `/stats` → `{"todo":2,"in_progress":1,"done":1}`, `COUNT` SQL manuel → `{"todo":2,"done":1,"in_progress":1}` — identiques |
+| Limite : table vide | 200 avec des zéros | `{"todo":0,"in_progress":0,"done":0}` en HTTP 200 |
+| Adverse : `docker compose stop db` | erreur claire, pas de stacktrace | `503 {"detail":"stats-api ne parvient pas a joindre la base de donnees"}` |
+
+**Une différence de comportement entre les deux services, sur le même incident.**
+Base coupée, `stats-api` répond 503 en **4 ms**, là où `todo-api` met **3,0 s**
+pour la même panne. Ce n'est pas une lenteur de Node : c'est le `connectionTimeoutMillis: 3000`
+du pool `pg`, qui attend l'expiration du délai avant d'abandonner, alors que
+`psycopg2` remonte immédiatement l'échec de résolution du nom. Les deux réponses
+sont correctes, mais un client qui appelle les deux services verra deux profils
+de latence très différents en cas de panne — de quoi fausser un timeout côté
+appelant si on ne le sait pas.
+
+**Un test hors checklist.** J'ai inséré directement en base une tâche avec un
+`status` absent de `KNOWN_STATUSES` (`archived`), pour voir si la ligne
+`counts[status] = count` du code fourni cassait. Elle ne casse pas : Python crée
+simplement la clé, et `/stats` répond `{"todo":0,"in_progress":0,"done":0,"archived":1}`
+en 200. Le service est donc plus robuste que prévu sur ce point — l'état inconnu
+apparaît comme clé supplémentaire au lieu de faire tomber la requête. À garder en
+tête tout de même : un client qui suppose exactement trois clés dans la réponse
+serait pris au dépourvu.
