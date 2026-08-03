@@ -1,11 +1,7 @@
 'use strict';
 
 const { randomUUID } = require('node:crypto');
-
-// Stockage en memoire, volontairement ephemere : un redemarrage du conteneur
-// efface tout. C'est exactement le probleme que le chapitre 6 resout avec
-// PostgreSQL et un volume nomme.
-const tasks = new Map();
+const { pool } = require('../db');
 
 // Les trois etats admis. La meme liste est reprise cote stats-api (chapitre 8),
 // qui compte les taches par etat.
@@ -13,7 +9,8 @@ const STATUSES = ['todo', 'in_progress', 'done'];
 
 // Une description est du texte saisi par un humain. Sans borne explicite, un
 // POST de 50 000 caracteres passe la validation, gonfle la memoire du process
-// et finira par le faire tomber. On tranche a 500 caracteres.
+// et finira par le faire tomber. On tranche a 500 caracteres, la meme valeur
+// que le VARCHAR(500) de la colonne en base.
 const MAX_DESCRIPTION_LENGTH = 500;
 
 class ValidationError extends Error {
@@ -63,47 +60,72 @@ function validate(input, { partial = false } = {}) {
   return clean;
 }
 
-function findAll() {
-  return [...tasks.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-}
-
-function findById(id) {
-  return tasks.get(id) ?? null;
-}
-
-function create(input) {
-  const { description, status = 'todo' } = validate(input);
-  const now = new Date().toISOString();
-
-  const task = {
-    id: randomUUID(),
-    description,
-    status,
-    createdAt: now,
-    updatedAt: now,
+// La base parle en snake_case, l'API en camelCase. La conversion se fait ici,
+// une fois, plutot que d'etre eparpillee dans les routes.
+function toTask(row) {
+  return {
+    id: row.id,
+    description: row.description,
+    status: row.status,
+    createdAt: row.created_at.toISOString(),
+    updatedAt: row.updated_at.toISOString(),
   };
-
-  tasks.set(task.id, task);
-  return task;
 }
 
-function update(id, input) {
-  const existing = tasks.get(id);
-  if (!existing) return null;
+async function findAll() {
+  const { rows } = await pool.query('SELECT * FROM tasks ORDER BY created_at ASC');
+  return rows.map(toTask);
+}
+
+async function findById(id) {
+  // Un id qui n'est pas un UUID valide ferait echouer le cast cote Postgres
+  // avec une erreur 500 : on le traite comme un simple "introuvable".
+  if (!isUuid(id)) return null;
+
+  const { rows } = await pool.query('SELECT * FROM tasks WHERE id = $1', [id]);
+  return rows.length ? toTask(rows[0]) : null;
+}
+
+async function create(input) {
+  const { description, status = 'todo' } = validate(input);
+
+  // Requete parametree ($1, $2...) : les valeurs ne sont jamais concatenees
+  // dans la chaine SQL, donc aucune injection possible.
+  const { rows } = await pool.query(
+    'INSERT INTO tasks (id, description, status) VALUES ($1, $2, $3) RETURNING *',
+    [randomUUID(), description, status]
+  );
+  return toTask(rows[0]);
+}
+
+async function update(id, input) {
+  if (!isUuid(id)) return null;
 
   const changes = validate(input, { partial: true });
-  const updated = {
-    ...existing,
-    ...changes,
-    updatedAt: new Date().toISOString(),
-  };
 
-  tasks.set(id, updated);
-  return updated;
+  // COALESCE : on ne remplace un champ que si une nouvelle valeur est fournie,
+  // ce qui evite de construire dynamiquement la clause SET.
+  const { rows } = await pool.query(
+    `UPDATE tasks
+        SET description = COALESCE($2, description),
+            status      = COALESCE($3, status),
+            updated_at  = now()
+      WHERE id = $1
+      RETURNING *`,
+    [id, changes.description ?? null, changes.status ?? null]
+  );
+  return rows.length ? toTask(rows[0]) : null;
 }
 
-function remove(id) {
-  return tasks.delete(id);
+async function remove(id) {
+  if (!isUuid(id)) return false;
+
+  const { rowCount } = await pool.query('DELETE FROM tasks WHERE id = $1', [id]);
+  return rowCount > 0;
+}
+
+function isUuid(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
 }
 
 module.exports = {
