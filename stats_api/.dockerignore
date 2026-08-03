@@ -1,0 +1,13 @@
+# Le COPY . . de ce Dockerfile prend tout le dossier stats_api : sans filtre,
+# un .env ou un __pycache__ local partirait dans l'image.
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.venv
+venv
+.env
+.env.*
+Dockerfile
+.dockerignore
+*.md
