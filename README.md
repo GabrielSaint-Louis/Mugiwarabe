@@ -219,3 +219,93 @@ placé sur `other-network`, échoue avec `ping: bad address 'isole'`. Le volume
 `todo-logs` a bien survécu à la suppression de `todo-writer` et `todo-reader`,
 relu tel quel par un `todo-checker` créé après coup, et vit sur l'hôte dans
 `/var/lib/docker/volumes/todo-logs/_data`.
+
+## Chapitre 7 — Docker Compose et la configuration
+
+### Mission A — la configuration sort du code
+
+`src/config.js` est devenu le point unique de lecture de l'environnement. Le
+code de connexion ne contient plus aucune valeur en dur : ni l'IP `172.17.0.2`
+du chapitre 6, ni le nom `todo-postgres` qui l'avait remplacée, ni les
+identifiants. `git log --all -- .env` ne renvoie rien : le `.env` n'a jamais été
+commité, seul `.env.example` l'est.
+
+Retirer une variable obligatoire fait échouer le démarrage net :
+
+```
+Error: Variable d'environnement obligatoire manquante : DB_PASSWORD.
+       Copiez .env.example vers .env et renseignez-la.
+    at required (/app/src/config.js:15:11)
+```
+
+Code de sortie `1`, message qui nomme la variable et dit quoi faire. C'est très
+exactement ce qu'on veut à la place d'un `undefined` qui se propage jusqu'à une
+erreur illisible du driver Postgres.
+
+### Mission B — toute la stack dans un fichier
+
+`docker compose up -d` crée les **5 ressources** attendues : le network
+`todo-network`, le volume `todo_pgdata`, et les trois conteneurs `db`,
+`todo-api`, `adminer`. Adminer répond en HTTP 200 et se connecte à la base avec
+le service `db` comme serveur.
+
+**Le healthcheck Postgres passe `Healthy` en 5,2 s, dès la première sonde.** Le
+temps n'est pas celui de Postgres, qui est prêt en moins d'une seconde sur un
+data dir existant : c'est le `start_period: 5s` qui retarde la première sonde.
+Le `up -d` complet prend 12 s de bout en bout.
+
+**Les ajustements de noms entre le chapitre 6 et Compose.** Deux à noter :
+
+- le **network** n'a pas bougé, mais uniquement parce que `name: todo-network`
+  est déclaré explicitement. Sans cette ligne, Compose l'aurait préfixé du nom
+  de projet et créé un `todo_todo-network` à côté de celui du chapitre 6 ;
+- le **volume**, lui, a changé. Le chapitre 6 avait créé `todo-pgdata` à la
+  main ; Compose gère `pgdata`, qu'il préfixe en `todo_pgdata`. Ce sont deux
+  volumes distincts, donc la première requête sur la stack Compose a renvoyé
+  `[]` alors que la tâche du chapitre 6 existait toujours. Rien n'est perdu —
+  `todo-pgdata` est toujours là — mais c'est le genre de détail qui fait croire
+  à une perte de données pendant trente secondes.
+
+**Variables ajoutées en cours de route.** `.env.example` a gagné trois clés qui
+n'existaient pas au chapitre 6 : `API_PORT`, `ADMINER_PORT` et `STATS_PORT`. Elles
+sont volontairement distinctes de `PORT` : `PORT` est le port d'écoute *dans* le
+conteneur, `API_PORT` le port publié *sur l'hôte*. Cette séparation a servi
+immédiatement — 3000 et 3001 sont déjà pris sur cette machine par une autre
+application. Le `.env` local publie donc sur 8080, 8081 et 8082, **sans une seule
+modification de l'image ni du `docker-compose.yml`**. C'est très concrètement ce
+que la configuration externalisée achète.
+
+### Les trois scénarios
+
+**Nominal.** Les trois conteneurs passent `running`, `db` en `healthy`, et
+`GET /api/tasks` renvoie du JSON.
+
+**Cas limite : `DB_PASSWORD` retirée du `.env`.** Le TP annonce que Postgres
+refusera de démarrer, que son healthcheck échouera en boucle, et que l'API
+restera bloquée en `created` sans jamais démarrer. **Ce n'est pas ce qui s'est
+passé ici**, et l'écart est instructif :
+
+| | Prédit par le TP | Observé |
+| --- | --- | --- |
+| `db` | refuse de démarrer, healthcheck en échec | `Up (healthy)`, démarre normalement |
+| `todo-api` | bloquée en `created` | `Restarting (1)`, crash-loop |
+
+La raison tient en une ligne des logs de Postgres : `PostgreSQL Database
+directory appears to contain a database; Skipping initialization`.
+`POSTGRES_PASSWORD` n'est lu qu'au tout premier `initdb`. Sur un volume déjà
+initialisé, la variable est ignorée et le conteneur démarre avec le mot de passe
+d'origine. La prédiction du TP suppose un volume vierge.
+
+C'est donc l'API qui a bloqué, et par son propre garde-fou : le `required()` de
+`config.js` lève, le process sort en 1, et `restart: unless-stopped` le relance
+en boucle. Compose avait d'ailleurs prévenu en amont :
+`warning: The "DB_PASSWORD" variable is not set. Defaulting to a blank string.`
+Le résultat final est le même — la stack ne part pas silencieusement en marche
+dégradée — mais le service qui bloque n'est pas celui annoncé.
+
+**Cas adverse : la base tombe pendant que tout tourne.** `docker compose stop db`
+puis un `GET /api/tasks` renvoie `503 {"error":"base de donnees injoignable,
+reessayez plus tard"}` en **3,0 s** (le `connectionTimeoutMillis` du pool).
+`/health` continue de répondre 200 : le conteneur n'est pas mort avec sa base.
+Après `docker compose start db`, l'API **retrouve seule** le chemin de la base,
+sans redémarrage — le pool `pg` rouvre une connexion au premier appel suivant.
