@@ -57,6 +57,23 @@ services:
     networks:
       - todo-network
 
+  # --- Service Python de statistiques -----------------------------------------
+  stats-api:
+    build: ./stats_api
+    restart: unless-stopped
+    # Meme .env que todo-api : les deux services lisent la meme base, donc la
+    # meme configuration, avec les memes cles DB_*. C'est ce qui permet au code
+    # Python de fonctionner sans qu'on y touche.
+    env_file:
+      - .env
+    ports:
+      - '${STATS_PORT:-8000}:8000'
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - todo-network
+
   # --- Interface d'admin de la base -------------------------------------------
   adminer:
     image: adminer:4.8.1
