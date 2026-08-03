@@ -1,15 +1,12 @@
 'use strict';
 
+const config = require('./config');
 const app = require('./app');
 const { pool, initSchema } = require('./db');
 
-const PORT = Number(process.env.PORT) || 3000;
-// 0.0.0.0 et pas 127.0.0.1 : dans un conteneur, ecouter sur la loopback rend
-// l'app injoignable depuis l'exterieur, meme avec le bon -p.
-const HOST = process.env.HOST || '0.0.0.0';
-
-const server = app.listen(PORT, HOST, () => {
-  console.log(`todo-api en ecoute sur http://${HOST}:${PORT}`);
+const server = app.listen(config.port, config.host, () => {
+  console.log(`todo-api en ecoute sur http://${config.host}:${config.port}`);
+  console.log(`environnement : ${config.nodeEnv}, base visee : ${config.db.host}:${config.db.port}`);
 });
 
 // On ecoute AVANT d'avoir la base : /health doit repondre meme si Postgres est
