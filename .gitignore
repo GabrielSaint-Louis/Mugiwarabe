@@ -1,0 +1,11 @@
+node_modules/
+npm-debug.log*
+
+# La configuration reelle ne part jamais dans le depot : seul .env.example est
+# commite (chapitre 7).
+.env
+.env.local
+
+coverage/
+*.log
+.DS_Store
