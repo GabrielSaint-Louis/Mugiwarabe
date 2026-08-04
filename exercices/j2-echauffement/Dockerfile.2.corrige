@@ -1,0 +1,12 @@
+# Correction du fichier 2 : seul l'ORDRE des instructions change.
+# Les manifestes sont copies avant le code source, donc la couche `npm ci`
+# n'est invalidee que quand les dependances bougent, pas a chaque commit.
+FROM node:18-alpine
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
+COPY src ./src
+EXPOSE 3000
+# Le CMD d'origine pointait sur server.js a la racine : ce fichier n'existe pas
+# dans ce projet, le point d'entree est src/server.js.
+CMD ["node", "src/server.js"]

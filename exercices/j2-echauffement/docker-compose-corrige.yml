@@ -1,0 +1,40 @@
+# Correction du fichier 4. Trois defauts, trois corrections.
+#
+#  1. `db-data` sous `volumes:` n'etait pas une cle YAML (pas de deux-points) :
+#     le fichier ne se lisait pas du tout ("volumes must be a mapping").
+#  2. DB_HOST: postgres alors que le service s'appelle `database` : le nom DNS
+#     du reseau Docker, c'est le nom du service. `postgres` n'existe pas.
+#  3. `version: '3.8'` : obsolete, Compose affiche un avertissement. Retiree.
+#
+# Et un quatrieme, celui que le TP nomme dans son tableau d'erreurs :
+# `depends_on` en liste courte n'attend que le demarrage du conteneur, pas la
+# disponibilite de Postgres. D'ou le healthcheck + condition: service_healthy.
+
+services:
+  web:
+    build: .
+    ports:
+      - "3000:3000"
+    depends_on:
+      database:
+        condition: service_healthy
+    environment:
+      DB_HOST: database
+      DB_PORT: 5432
+
+  database:
+    image: postgres:15
+    environment:
+      POSTGRES_PASSWORD: secret
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    # Pas de `ports:` : la base n'est joignable que par `web`, sur le reseau
+    # Docker. C'est la regle du chapitre EXPOSE contre ports.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  db-data:

@@ -1,4 +1,4 @@
-# Todo API — TP DevOps / Docker, jour 1
+# Todo API — TP DevOps / Docker, jours 1 et 2
 
 Projet fil rouge du TP « Initiation à la méthodologie DevOps, GitLab CI/CD et
 conteneurisation Docker ». Une API de gestion de tâches Node.js, dockerisée de
@@ -93,6 +93,7 @@ tp-devops-todo-api/
 │    ├── requirements.txt
 │    └── Dockerfile
 ├── scripts/measure.sh            # les 4 métriques du chapitre 10
+├── exercices/j2-echauffement/    # les 4 fichiers cassés du J2 et leurs corrigés
 ├── tests/                        # plus tard dans la semaine
 ├── Dockerfile                    # image de production
 ├── Dockerfile.simple             # le brouillon, gardé comme référence de mesure
@@ -619,6 +620,228 @@ est précisément l'intérêt de cette liste en dur.
 
 ---
 
+# Jour 2 — matin : diagnostiquer avant d'automatiser
+
+## Échauffement — quatre fichiers cassés, quatre diagnostics
+
+Les fichiers sont dans [`exercices/j2-echauffement/`](exercices/j2-echauffement/),
+avec un corrigé à côté de chacun. Ce sont des supports d'exercice : rien là-dedans
+n'est branché sur l'application.
+
+### Fichier 1 — l'erreur subtile
+
+**Symptôme.** Le build passe. Il ne sort qu'un avertissement, facile à ignorer :
+`JSONArgsRecommended: JSON arguments recommended for CMD to prevent unintended
+behavior related to OS signals (line 7)`.
+
+**Cause A — le lock file manque au `COPY` de la ligne 3.** `npm install` sans
+`package-lock.json` re-résout tout l'arbre. Comparaison de l'arbre installé dans
+l'image avec le lock du dépôt : **84 paquets installés, 2 divergent** —
+`encodeurl` 1.0.2 → 2.0.0 et `ms` 2.1.3 → 2.0.0. Deux effets en cascade, et le
+second est le plus vicieux : le `COPY . .` de la ligne 5 remet ensuite le lock
+dans l'image, qui contient donc un `package-lock.json` **qui ne décrit pas son
+propre `node_modules`**. Et comme la couche d'install n'est indexée que sur
+`package.json`, modifier le lock ne la réinvalide même pas.
+
+**Cause B — `CMD npm start`, en forme shell.** Dans le conteneur :
+
+```
+PID   COMMAND
+    1 npm start
+   18 node src/server.js
+```
+
+npm est PID 1, l'application est son enfant. Mesuré contre le même conteneur
+lancé en forme exec :
+
+| | `CMD npm start` | forme exec |
+| --- | --- | --- |
+| Mémoire | **42,36 Mio** | 23,38 Mio |
+| PIDs | 22 | 11 |
+| `docker stop` | 0,15 s | 0,17 s |
+| Code de sortie quand l'app est tuée par `SIGKILL` | **1** | **137** |
+
+Deux surprises. D'abord, l'arrêt est propre : npm 10.8.2 relaie bien le SIGTERM,
+la panne classique des « 10 secondes puis SIGKILL » ne s'est pas produite — elle
+suppose un `sh` qui reste en PID 1 sans relayer, ce qui arrive avec un CMD shell
+plus complexe qu'un simple `npm start`. Ensuite, ce qui casse vraiment est
+ailleurs : **npm écrase le code de sortie**. L'app tuée par SIGKILL fait sortir le
+conteneur en 1 au lieu de 137. Un orchestrateur qui distingue « crash applicatif »
+de « tué par le OOM killer » se trompe de diagnostic, et 19 Mio partent en fumée
+au passage pour un process qui ne sert plus à rien une fois l'app démarrée.
+
+**Correction.** `COPY package.json package-lock.json ./` + `npm ci --omit=dev`,
+et `CMD ["node", "src/server.js"]` (`Dockerfile.1.corrige`).
+
+### Fichier 2 — l'ordre compte
+
+Protocole : `docker builder prune -af`, build, rebuild sans rien toucher, puis
+ajout d'une ligne dans `src/app.js` et rebuild.
+
+| Build | Fichier d'origine | Fichier corrigé |
+| --- | --- | --- |
+| À froid | 4,59 s | 4,32 s |
+| Sans rien modifier | 0,65 s | — |
+| **Après modification de `src/app.js`** | **3,58 s** | **0,74 s** |
+
+**Cause.** `COPY . .` est en ligne 3, avant `RUN npm install`. Une virgule dans
+`src/app.js` change la couche `COPY`, donc invalide tout ce qui suit, donc
+réinstalle 84 paquets qui n'ont pas bougé. Le corrigé ne change **que l'ordre** :
+manifestes d'abord, `npm ci`, code source ensuite. Le rebuild tombe à 0,74 s, soit
+**4,8× plus rapide, −2,83 s par build**. Sur les 50 builds quotidiens du scénario
+du chapitre 10, c'est 2 min 21 s de machine par jour, sur ce seul fichier.
+
+**Défaut bonus.** Le TP annonce « celui-ci fonctionne ». Pas sur ce projet :
+`CMD ["node", "server.js"]` donne `Error: Cannot find module '/app/server.js'`,
+le point d'entrée étant `src/server.js`. Le fichier build bien, mais l'image ne
+démarre pas.
+
+### Fichier 3 — l'image géante
+
+**Symptôme d'abord, avant même la taille : le build échoue.**
+`npm error Missing script: "build"` — ce projet n'a pas de script `build`, et
+`RUN npm run build` sort en 1. `Dockerfile.3.mesurable` retire cette seule ligne
+pour rendre la taille mesurable : **1,58 Go sur disque, 397 Mo de contenu**.
+
+Trois raisons distinctes à ce poids, chacune avec sa technique de J1 :
+
+| # | Raison | Mesure | Technique J1 |
+| --- | --- | --- | --- |
+| 1 | Image de base `node:18` (Debian bookworm) | **1,58 Go à elle seule**, contre 192 Mo pour `node:18-alpine` | image de base minimale, tag épinglé |
+| 2 | `npm install` laisse son cache dans l'image | `/root/.npm` = 3,6 Mo embarqués ; couche d'install = 9,57 Mo | `npm ci --omit=dev && npm cache clean --force`, ou multi-stage |
+| 3 | `COPY . .` embarque tout le contexte | l'image contient `scripts/`, `exercices/`, `package-lock.json`, `.env.example` | `.dockerignore` + `COPY` ciblé |
+
+La raison 1 écrase les deux autres : **99 % du poids ne vient pas du projet**,
+il vient du choix de la première ligne. Le corrigé (`Dockerfile.3.corrige`,
+alpine + multi-stage + `npm ci --omit=dev`) tombe à **188 Mo, soit −88 %**.
+
+**Le test qui fait le plus peur.** Pour chiffrer la raison 3, j'ai rebuildé le
+même fichier après avoir retiré temporairement le `.dockerignore` : la couche
+`COPY` passe de 143 ko à **7,14 Mo**, et surtout `/app/.env` **atterrit dans
+l'image**, 352 octets, `DB_PASSWORD` lisible par qui tire l'image. La taille
+n'était pas le vrai problème de ce fichier.
+
+### Fichier 4 — le compose qui ne se parle pas
+
+**Défaut 1, à la lecture.** `docker compose config` refuse le fichier :
+
+```
+validating docker-compose-broken.yml: volumes must be a mapping
+```
+
+`db-data` est écrit sans deux-points sous `volumes:` : YAML lit une chaîne là où
+Compose attend une clé. Aucun conteneur ne démarre, et l'erreur ne parle pas de
+la ligne fautive — il faut savoir que « mapping » veut dire « il manque un `:` ».
+
+**Défaut 2, à l'exécution.** Le deux-points ajouté, la stack démarre, et
+l'application n'atteint jamais sa base. `DB_HOST: postgres` alors que le service
+s'appelle `database` : sur un réseau Docker, le nom DNS **est** le nom du service.
+
+```
+database          -> 172.19.0.2
+postgres          -> ERREUR EAI_AGAIN
+```
+
+Bout en bout, avec l'image de la Todo API branchée sur ce réseau :
+
+| `DB_HOST` | `/health` | `/api/tasks` | Logs |
+| --- | --- | --- | --- |
+| `postgres` | 200 | **503** `{"error":"base de donnees injoignable, reessayez plus tard"}` | `Connection terminated due to connection timeout` |
+| `database` | 200 | **200** `[]` | — |
+
+Détail qui explique le message : le résolveur embarqué de Docker (127.0.0.11)
+ne répond pas « inconnu » pour `postgres`, il transmet la question en amont et
+attend. D'où un `EAI_AGAIN` puis un *timeout* côté driver, et non un `ENOTFOUND`
+franc. Un nom de service faux coûte donc plusieurs secondes par tentative avant
+de se voir.
+
+**Défaut 3, invisible à l'exécution.** `version: '3.8'` en tête :
+`the attribute 'version' is obsolete, it will be ignored`. Retirée dans le
+corrigé.
+
+**Défaut 4, celui du tableau d'erreurs du TP.** `depends_on` en liste courte
+n'attend que le *démarrage du conteneur* Postgres, pas sa disponibilité : c'est
+la fabrique à `connection refused` au premier boot. Le corrigé passe en
+`condition: service_healthy` avec un `pg_isready`.
+
+### Bonus non prévu : un vrai `port already allocated`
+
+En lançant la stack, Docker a refusé le port 3000, puis le 3001 :
+
+```
+failed to bind host port 0.0.0.0:3000/tcp: address already in use
+```
+
+`docker ps` ne montrait **rien** sur 3000. Normal : le coupable n'était pas un
+conteneur mais un process de l'hôte, `node /var/www/lpa/backend/src/app.js`
+(PID 347951), trouvé avec `ss -ltnp`. Leçon retenue pour cet après-midi : quand
+un port est pris, `docker ps` n'est qu'une moitié de réponse, `ss` ou `lsof` est
+l'autre. La stack est repartie sur 3456.
+
+## Le cas qui piège tout le monde : `EXPOSE` contre `ports`
+
+Vérifié sur nos propres images plutôt que sur parole.
+
+**`EXPOSE` ne publie rien.** L'image `todo-api` déclare
+`ExposedPorts: {"3000/tcp":{}}`. Lancée sans `-p`, le conteneur affiche
+`Ports: {"3000/tcp": null}` : aucune publication.
+
+**Mais attention à la conclusion trop rapide sur un hôte Linux.** Sans le moindre
+`-p`, `curl http://172.17.0.3:3000/health` depuis la machine répond **200**.
+Ce n'est pas `EXPOSE` qui fait ça : l'hôte route directement vers le réseau
+bridge. Une autre machine du réseau, elle, n'y arrive pas. « Non publié » veut
+dire « pas de mapping sur l'hôte », pas « inatteignable depuis l'hôte ».
+
+**Sur la vraie stack.** `db` n'a pas de `ports:` :
+
+| Vérification | Résultat |
+| --- | --- |
+| `docker compose ps` → colonne Publishers de `db` | `[{ 5432 0 tcp}]` — port hôte 0, donc aucun |
+| `docker compose port db 5432` | `invalid IP:0` |
+| `todo-api` → `db:5432` (`SELECT count(*) FROM tasks`) | **4 tâches** |
+
+La base est donc joignable par l'API et par personne d'autre, ce qui est
+exactement l'intention du chapitre 6.
+
+**Le piège de mesure, rencontré pour de bon.** Un test TCP direct sur
+`127.0.0.1:5432` depuis l'hôte répond « ouvert » — de quoi croire que la base du compose fuit.
+Elle ne fuit pas : c'est un **PostgreSQL 16 installé sur la machine** (PID 82631,
+`127.0.0.1:5432`) qui répond, comme le port 3000 était tenu par une application
+hors Docker. Avant de conclure qu'un conteneur expose quelque chose, vérifier
+**qui** écoute, pas seulement **que** ça écoute.
+
+Les trois réflexes du chapitre, dont deux étaient déjà en place ici : rien n'est
+publié par défaut (`db` n'a jamais eu de `ports:`), on publie sur `127.0.0.1`
+quand c'est pour débugger (le registry local du chapitre 9 est en
+`127.0.0.1:5000`), et le port de dev n'est pas celui de prod (`API_PORT` vient du
+`.env`).
+
+## Ce que le reste du matin change pour ce repo
+
+Le reste de la matinée est du cours — DevOps et CALMS, l'histoire des outils, les
+principes de la CI, l'anatomie d'une pipeline, trois pipelines décortiquées,
+DevSecOps, K3S. Quatre points s'appliquent directement à ce dépôt, et deux
+pointent un manque :
+
+- **Le budget de dix minutes est déjà tenable.** Les mesures du chapitre 10
+  donnent 1,00 s et 0,48 s de build à chaud pour les deux images : le stage
+  `build` d'une future pipeline ne sera pas le problème. C'est l'inverse qui est
+  vrai — le cache de layers et le poids de l'image, traités hier comme de
+  l'esthétique, sont en fait des lignes du budget de temps de la CI.
+- **Un artefact construit une fois, promu ensuite.** Le chapitre 9 tague à la
+  main en `1.0.0`. La règle du jour dit : taguer par `sha` de commit, et promouvoir
+  la **même** image de staging vers la prod. À corriger quand la pipeline arrivera.
+- **`npm test` n'existe pas.** Le `package.json` n'a que `start` et `dev`, et
+  `tests/` est vide. Une pipeline branchée aujourd'hui n'aurait littéralement rien
+  à exécuter au stage `test` : c'est le trou n°1 avant d'automatiser quoi que ce
+  soit.
+- **Le DevSecOps commence par une ligne.** `npm audit --audit-level=high` en job,
+  et `gitleaks` qui relit **tout l'historique** — d'où l'importance du `.env`
+  jamais commité, dont la démonstration involontaire est plus haut : il suffit de
+  perdre le `.dockerignore` pour le retrouver dans une couche d'image.
+
+---
+
 ## Ce qui reste ouvert
 
 - **Les images ne sont publiées que sur un registry privé local.** Le token de la
@@ -626,8 +849,12 @@ est précisément l'intérêt de cette liste en dur.
   `gh auth refresh -h github.com -s write:packages` puis un changement de la
   ligne `IMAGE_PREFIX` du `.env` suffiraient à basculer sur GHCR — le
   `docker-compose.prod.yml` n'a pas à bouger.
-- **`tests/` est vide.** Le TP l'annonce pour plus tard dans la semaine ; les
-  scénarios validés aujourd'hui l'ont été à la main via `curl`, et sont
-  reproduits dans ce journal.
+- **`tests/` est vide et `npm test` n'existe pas.** Le TP l'annonce pour plus tard
+  dans la semaine ; les scénarios validés jusqu'ici l'ont été à la main via
+  `curl`, et sont reproduits dans ce journal. C'est le premier obstacle à une
+  pipeline utile : un stage `test` sans test est un stage vert qui ne prouve rien.
+- **Le tag des images est encore manuel** (`1.0.0` posé à la main au chapitre 9).
+  La règle « un artefact construit une fois, tagué par `sha` de commit, promu
+  ensuite » attend la pipeline.
 - **Aucune limite de ressources** (`deploy.resources.limits`) n'est posée sur les
-  services : sujet du jour 2.
+  services.
