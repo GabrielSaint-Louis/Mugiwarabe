@@ -842,6 +842,47 @@ pointent un manque :
 
 ---
 
+# Jour 2 — après-midi : première pipeline verte (ClickFast)
+
+L'après-midi ne se fait pas sur la Todo API — le TP l'écarte explicitement,
+« trop de pièces mobiles : base de données, secrets ». Le support est **ClickFast**,
+un jeu de clics statique, dans son propre dépôt :
+[GabrielSaint-Louis/tp-devops-clickfast](https://github.com/GabrielSaint-Louis/tp-devops-clickfast)
+· site publié : <https://gabrielsaint-louis.github.io/tp-devops-clickfast/>
+
+La pipeline : `test` → `build` → `deploy`, trois jobs enchaînés par `needs:`,
+déploiement Pages conditionné à `main`. Ce qu'elle a réellement produit :
+
+| Exécution | `test` | `build` | `deploy` | Durée |
+| --- | --- | --- | --- | --- |
+| Premier push | — | — | — | **0 s, zéro job** |
+| Après correction | ✅ | ✅ | ✅ | 48 s |
+| Régression volontaire (PR) | ❌ | skipped | skipped | 25 s |
+
+Trois choses à retenir ici, parce qu'elles retomberont sur la pipeline de cette
+API demain :
+
+- **Le premier rouge n'était pas un test cassé, c'était le YAML.** Zéro job, zéro
+  log, rouge instantané : `docker images --format 'Image : {{.Size}}'` contient un
+  `: ` que YAML lit comme un séparateur de clé, et le workflow entier est refusé
+  avant démarrage. Un `yaml.safe_load` en local avant de pousser aurait coûté deux
+  secondes.
+- **Le vert ne veut rien dire tant qu'on n'a pas vu la pipeline bloquer.** Une
+  branche où un clic vaut 2 points au lieu de 1 fait rougir `test` et laisse
+  `build` et `deploy` en *skipped* : aucune image construite, rien publié.
+- **Les tests aussi se testent.** Cinq tests Jest passaient encore après avoir
+  retiré le garde-fou « le temps est écoulé » du code : c'est l'attribut
+  `disabled` qui masquait le trou, pas la logique qui était vérifiée. Un sixième
+  test envoie l'événement avec `dispatchEvent()` pour contourner `disabled`, et
+  rougit correctement. Le même piège attend la Todo API : un test qui ne peut pas
+  échouer est un stage vert qui ne prouve rien.
+
+Ce dernier point rejoint directement le trou noté ce matin : `npm test` n'existe
+toujours pas ici, et c'est la première chose à écrire avant de brancher une
+pipeline sur cette API.
+
+---
+
 ## Ce qui reste ouvert
 
 - **Les images ne sont publiées que sur un registry privé local.** Le token de la
