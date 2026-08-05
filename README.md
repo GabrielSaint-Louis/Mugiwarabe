@@ -1,4 +1,4 @@
-# Todo API — TP DevOps / Docker, jours 1 et 2
+# Todo API — TP DevOps / Docker, jours 1 à 3
 
 Projet fil rouge du TP « Initiation à la méthodologie DevOps, GitLab CI/CD et
 conteneurisation Docker ». Une API de gestion de tâches Node.js, dockerisée de
@@ -77,6 +77,51 @@ docker push $IMAGE_PREFIX/stats-api:1.0.0
 ./scripts/measure.sh stats-api ./stats_api http://127.0.0.1:8081/health
 ```
 
+### Tester
+
+```bash
+npm test                 # 22 cas unitaires, aucune base nécessaire
+npm run lint
+
+# Les 21 cas d'intégration ont besoin d'un vrai PostgreSQL :
+docker run -d --name pg-test -p 127.0.0.1:15432:5432 \
+  -e POSTGRES_DB=todo_test -e POSTGRES_USER=todo_user -e POSTGRES_PASSWORD=todo_pass \
+  postgres:16-alpine
+export DB_HOST=127.0.0.1 DB_PORT=15432 DB_NAME=todo_test DB_USER=todo_user DB_PASSWORD=todo_pass
+npm run migrate && npm run test:integration
+```
+
+### Déployer (jour 3)
+
+Il n'y a rien à taper : un push sur `main` déclenche lint, tests, tests
+d'intégration, construction de l'image, publication sur GHCR taguée au sha, et
+déploiement sur la machine cible. Compter 1 min 15.
+
+La machine cible est une maquette locale — un conteneur qui embarque son propre
+Docker et un `sshd` :
+
+```bash
+./deploy/vm-prod.sh up       # la construire et la démarrer
+./deploy/vm-prod.sh status   # est-ce qu'elle répond
+./deploy/vm-prod.sh ssh      # ouvrir un shell dessus
+```
+
+| Service | URL (sur le serveur uniquement) | Tunnel depuis un poste |
+| --- | --- | --- |
+| API | `http://127.0.0.1:13000` | `ssh -L 13000:127.0.0.1:13000 <serveur>` |
+| Prometheus | `http://127.0.0.1:19090` | `ssh -L 19090:127.0.0.1:19090 <serveur>` |
+| Grafana | `http://127.0.0.1:13001` | `ssh -L 13001:127.0.0.1:13001 <serveur>` |
+
+Déployer une version précise, ou revenir à la précédente — **même commande** :
+
+```bash
+./deploy/vm-prod.sh ssh '/srv/todo/apply.sh <sha-du-commit>'
+```
+
+En cas de panne, tout est dans **[`docs/PROCEDURE_DEPLOIEMENT.md`](docs/PROCEDURE_DEPLOIEMENT.md)** :
+les signatures des six pannes connues, la commande de retour arrière et son
+critère de déclenchement.
+
 ## Structure
 
 ```
@@ -92,9 +137,28 @@ tp-devops-todo-api/
 │    ├── main.py
 │    ├── requirements.txt
 │    └── Dockerfile
-├── scripts/measure.sh            # les 4 métriques du chapitre 10
+├── .github/workflows/
+│    ├── ci.yml                   # J3 : lint, tests, intégration, image, déploiement
+│    └── runner-check.yml         # J3 : la preuve de où tourne un job
+├── deploy/                       # J3 — tout ce qui concerne la machine cible
+│    ├── Dockerfile.vm            # la machine de production, en maquette
+│    ├── vm-prod.sh               # la construire, la démarrer, s'y connecter
+│    ├── compose.yml              # la stack de prod : API, base, Prometheus, Grafana
+│    ├── apply.sh                 # déployer ET revenir en arrière, même commande
+│    ├── incident.sh              # les 5 pannes de l'exercice d'astreinte
+│    ├── prometheus.yml
+│    ├── grafana/                 # source de données et tableau de bord, en fichiers
+│    ├── env.example              # modèle du .env posé à la main sur la cible
+│    └── deploy_key.pub           # la privée n'est PAS ici, et ne le sera jamais
+├── docs/PROCEDURE_DEPLOIEMENT.md # J3 : ce qu'on lit à 3 h du matin
+├── scripts/
+│    ├── measure.sh               # les 4 métriques du chapitre 10
+│    ├── releve.sh                # J3 : une ligne du tableau de relevés
+│    └── charge.sh                # J3 : du trafic, pour que les panneaux bougent
 ├── exercices/j2-echauffement/    # les 4 fichiers cassés du J2 et leurs corrigés
-├── tests/                        # plus tard dans la semaine
+├── tests/
+│    ├── unit/                    # 22 cas, sans base
+│    └── integration/             # 21 cas, contre un vrai PostgreSQL
 ├── Dockerfile                    # image de production
 ├── Dockerfile.simple             # le brouillon, gardé comme référence de mesure
 ├── docker-compose.yml            # stack de dev, construite depuis les sources
@@ -883,19 +947,297 @@ pipeline sur cette API.
 
 ---
 
+# Jour 3 — déploiement automatisé, surveillance, astreinte
+
+La veille au soir, l'image était parfaite et personne ne pouvait s'en servir :
+elle dormait sur un registry. Et la pipeline qui la construisait vivait sur
+ClickFast, pas ici. Deux trous, refermés dans cet ordre.
+
+## Phases 1 à 4 — la pipeline atteint une machine de production
+
+**La pipeline déménage.** Cinq jobs sur `.github/workflows/ci.yml`. `lint`,
+`test` et `test-integration` en parallèle, `build` derrière les trois, `deploy`
+derrière `build`. La règle de déclenchement sépare les deux usages : une pull
+request vérifie et construit sans rien publier, un push sur `main` publie
+l'image taguée au sha et la déploie.
+
+Registry : **GHCR** et pas Docker Hub. Le `GITHUB_TOKEN` du run suffit à
+s'authentifier, donc aucun mot de passe de registry à stocker en secret, et le
+jeton meurt avec le job. Ça referme au passage le premier point resté ouvert le
+J2 (le scope `write:packages` manquant sur le token `gh`) : la pipeline n'en a
+pas besoin, elle a le sien.
+
+**La machine cible.** Un conteneur `docker:28-dind` avec un `sshd`. Les trois
+vérifications demandées :
+
+| Vérification | Résultat |
+| --- | --- |
+| Connexion par clé, puis `docker run --rm hello-world` dedans | `Hello from Docker!` |
+| La même connexion **sans** `-i deploy_key` | `Permission denied (publickey)`, code 255 |
+| `docker restart vm-prod` puis reconnexion | `hello-world` toujours présent, grâce au volume |
+
+Et l'isolation, en une ligne : `docker ps` **dans** la cible affiche zéro
+conteneur, quand l'hôte en affiche six. Une panne en « production » ne touche
+pas l'environnement de travail — ce qui n'est pas théorique ici, ce serveur
+héberge un vrai site en pm2.
+
+Deux écarts assumés par rapport au TP, tous deux dictés par cette machine :
+
+- **Ports décalés côté hôte** : 2222, 13000, 19090, 13001 au lieu de 2222, 3000,
+  9090, 3001. Les ports 3000 et 3001 appartiennent déjà au site en production.
+  À l'intérieur de la machine cible, rien ne change.
+- **Publication sur `127.0.0.1`** et pas `0.0.0.0`. Ce serveur est exposé sur
+  Internet ; un `sshd` root et un Grafana n'ont pas à l'être. On y accède par
+  tunnel SSH.
+
+**Le runner self-hosted.** Le même job, écrit deux fois, et un seul mot qui
+change :
+
+| `runs-on` | `hostname` | Conteneurs visibles | Machine cible joignable |
+| --- | --- | --- | --- |
+| `self-hosted` | `ubuntu` | les 6 de ce serveur | oui, port 2222 ouvert |
+| `ubuntu-latest` | `runnervmvrwv9` | aucun | non, « et c'est normal » |
+
+Le garde-fou de sécurité est vérifié plutôt qu'affirmé : sur la branche de
+travail, le job `Deploiement` est sorti **`skipped`**. Ce dépôt est public,
+un runner self-hosted exécute sur une vraie machine ce que la pipeline lui dit
+d'exécuter, et `if: github.ref == 'refs/heads/main'` est la ligne qui sépare
+« ma machine exécute ce que j'ai fusionné moi-même » de « ma machine exécute ce
+que n'importe qui a proposé ».
+
+**Le premier déploiement automatique** est passé du premier coup :
+`L'API repond apres 2 tentative(s)`, puis
+`{"status":"ok","timestamp":"2026-08-05T12:52:01.320Z"}`. Sans qu'une seule
+commande ait été tapée à la main.
+
+## Phase 5 — rejouer, et revenir en arrière
+
+**Idempotence.** Le même déploiement rejoué sur le même code :
+
+| | Avant | Après |
+| --- | --- | --- |
+| ID du conteneur `todo-api` | `4296efc22db7…` | `4296efc22db7…` |
+| `StartedAt` | `12:51:59.050Z` | `12:51:59.050Z` |
+| Conteneurs | `todo-api`, `todo-db` | `todo-api`, `todo-db` |
+| Tâches en base | 1 | 1 |
+
+Pas seulement « ça remarche » : le conteneur n'a même pas été redémarré.
+`docker compose up -d` a comparé l'état voulu à l'état réel et n'a rien touché.
+Aucun orphelin, aucun `port already allocated` — celui-là même qui avait été
+rencontré au J2 avec une séquence de `docker run`.
+
+**Le retour arrière, chronomètre en main.** Une régression volontaire (le champ
+`status` retiré de la réponse) a été fusionnée sur `main`. Elle a franchi le
+linter et les 22 tests unitaires sans en réveiller un seul, et la pipeline l'a
+déployée sans broncher.
+
+| Moment | Heure (UTC) |
+| --- | --- |
+| Constat — le champ `status` a disparu de `/api/tasks` | 12:56:32 |
+| Service rétabli sur la version précédente | 12:56:34 |
+| **Durée constat → rétablissement** | **2 secondes** |
+
+Deux secondes, parce qu'il n'y a eu ni build, ni pipeline, ni conjecture :
+l'image d'avant était déjà sur le registry, taguée au sha de son commit. Il a
+suffi de la nommer. La bonne nouvelle du J2 (« un tag au sha ») a payé son
+premier dividende ici.
+
+Le troisième scénario, l'échec propre :
+
+| Commande | Sortie | État de la production |
+| --- | --- | --- |
+| `apply.sh 000000…` (tag inexistant) | `Error manifest unknown`, code 1 | **intacte**, l'ancienne version tourne |
+| `docker compose up -d` sans `TAG` | `required variable TAG is missing a value`, code 1 | intacte |
+
+**Ce que la phase a révélé et qui n'était pas prévu :** le garde `${TAG:?}` du
+`compose.yml` casse aussi toutes les commandes de *lecture* — `docker compose
+ps`, `docker compose logs` — celles qu'on tape justement pendant une panne. Une
+procédure d'astreinte bâtie dessus aurait laissé son lecteur devant un message
+d'erreur au premier diagnostic. D'où `apply.sh`, qui écrit le sha dans le
+`.env` de la machine : il devient l'état courant, lisible ensuite par toutes
+les commandes, et déployer devient le même geste que revenir en arrière.
+
+## Phase 6 — les tests qui touchent la base
+
+La régression du champ `status` est passée devant 22 tests unitaires et le
+linter. Aucun d'eux ne regardait la forme réelle d'une réponse.
+
+La suite d'intégration a été écrite **avant** de corriger le code, et lancée
+contre lui :
+
+```
+✕ creer une tache, puis la relire par son id, et retrouver ce qui a ete envoye
+✕ une tache creee sans status prend la valeur par defaut todo
+✕ modifier une tache change updatedAt et laisse createdAt tranquille
+✓ … 9 autres
+
+Tests: 3 failed, 9 passed, 12 total
+```
+
+Une ligne corrigée dans `toTask()` : **12 verts sur 12**. C'est la seule parade
+fiable au test décoratif — casser le code exprès et vérifier que la suite
+devient rouge.
+
+Ce qui fait la différence dans ces tests : la relecture compare l'objet
+**entier**, pas champ par champ. Un `expect(body.description).toBe(...)` reste
+vert quand un autre champ disparaît.
+
+En pipeline, le job tourne sur `ubuntu-latest` avec un PostgreSQL jetable en
+`services:`, un `--health-cmd pg_isready` pour ne pas démarrer pendant l'initdb,
+et `npm run migrate` avant les tests. La migration importe le `SCHEMA` de
+`src/db.js` au lieu d'en garder une copie : c'est exactement la divergence
+base de test / base de prod qui produit les histoires du vendredi 17 h 32.
+
+## Phases 7 et 8 — mesurer, et regarder
+
+Quatre mesures exposées sur `/metrics`, en texte brut :
+
+```
+http_requests_total{method="GET",route="/api/tasks",status="200"} 12
+http_requests_total{method="POST",route="/api/tasks",status="201"} 3
+http_requests_total{method="GET",route="/api/tasks/:id",status="404"} 1
+todo_tasks_created_total 3
+todo_tasks_in_database{status="todo"} 6
+todo_tasks_in_database{status="in_progress"} 0
+todo_tasks_in_database{status="done"} 0
+```
+
+Les deux pièges annoncés par le TP sont évités **et testés** : un 404 sur route
+inconnue est compté, mais sous le label fixe `(inconnue)` et jamais sous l'URL
+demandée ; l'identifiant d'une tâche n'apparaît nulle part, c'est
+`/api/tasks/:id` qui sert de label.
+
+Un troisième piège, non annoncé, a été trouvé par le test : la racine d'un
+routeur Express produit `/api/tasks/` avec une barre finale que
+`/api/tasks/:id` n'a pas. Deux écritures pour deux routes voisines, c'est un
+tableau de bord où l'on hésite à chaque panneau.
+
+Les buckets de l'histogramme descendent à 5 ms et pas 50 : cette API répond en
+quelques millisecondes, et avec les tranches d'un exemple générique tout
+tomberait dans le premier seau — le p95 répondrait « moins de 50 ms » sans
+jamais rien distinguer.
+
+### Le tableau de relevés
+
+Prometheus scrape toutes les 5 s. `up` bascule à 0 en **4 secondes** après un
+`docker stop todo-api`, bien en deçà des 15 s demandées.
+
+| Moment | `up` | Requêtes/s | Taux d'erreur | p95 |
+| --- | --- | --- | --- | --- |
+| Au repos, avant la boucle de charge | 1 | 0,036 | 0,000 % | 5 ms |
+| Pendant la boucle de charge | 1 | 12,473 | 0,000 % | 5 ms |
+| Pendant l'incident — **base coupée** | **1** | 12,600 | **65,483 %** | 5 ms |
+| Pendant l'incident — **API arrêtée** | **0** | — | — | — |
+
+Le 0,036 req/s au repos n'est pas du bruit : c'est le `HEALTHCHECK` du
+Dockerfile, toutes les 30 secondes. 1/30 = 0,033.
+
+**Les deux dernières lignes sont le vrai résultat de la journée.** Couper la
+base et couper l'API donnent deux signatures que rien ne confond :
+
+- **base coupée** → la cible répond toujours (`up` = 1), mais 65 % des réponses
+  sont des **503**, et les créations (201) tombent à zéro ;
+- **API arrêtée** → `up` = 0, et plus aucune donnée du tout.
+
+Cette distinction tient à un choix d'implémentation qui ne se voit pas dans le
+code : `/metrics` **avale** l'erreur de sa jauge métier quand la base est
+absente. Si elle remontait, la page répondrait 500, Prometheus n'obtiendrait
+plus rien, `up` passerait à 0 — et une base tombée serait indiscernable d'une
+API morte.
+
+## Phase 10 — l'astreinte
+
+Le TP fait jouer cette phase en binôme, un pilote qui diagnostique et des mains
+qui exécutent. **Fait seul ici**, les deux rôles tenus par la même personne :
+c'est l'écart le plus important du rendu, et il enlève au test sa partie la plus
+sévère — la procédure n'a pas été confrontée à quelqu'un qui ne l'avait pas
+écrite. Ce qui reste vérifiable l'a été : le tirage de la panne, lui, est
+réellement aléatoire, et la réparation s'est faite en suivant le document.
+
+### Entrée « mains » — ce que j'ai appris de mon propre système
+
+Deux incidents tirés au sort, chronomètre en main :
+
+| | Panne tirée | Diagnostic | Temps constat → rétablissement |
+| --- | --- | --- | --- |
+| 1ᵉʳ | n° 1, `docker stop todo-api` | juste | **38 s** |
+| 2ᵉ | n° 2, `docker stop todo-db` | juste | **17 s** |
+
+Le temps divisé par deux ne mesure pas une progression personnelle. Il mesure
+ce que valent les quatre corrections apportées à la procédure entre les deux.
+
+### Entrée « pilote » — ce qui m'a manqué
+
+Quatre choses, dans l'ordre où elles ont coûté du temps.
+
+1. **Trois pannes différentes donnent `up = 0`.** Mon tableau des signatures
+   disait « `todo-api` absent » pour l'API arrêtée et « `Exited` ou
+   `Restarting` » pour l'API relancée sans configuration — sauf que les deux
+   laissent un conteneur `Exited`. Le critère qui tranche vraiment est le
+   **code de sortie** : `Exited (0)` = arrêt propre, `Exited (1)` = plantage au
+   démarrage. Corrigé.
+2. **Les logs se lisent par la fin.** Huit lignes `ENOTFOUND todo-db`, restes
+   d'un incident antérieur, précédaient le `SIGTERM recu` qui, lui, disait la
+   vérité. Sans regarder l'ordre, on part réparer la base alors que c'est l'API
+   qu'on a arrêtée.
+3. **Le panneau *Trafic* ne dit pas « plus personne n'appelle ».** Au premier
+   incident, mon générateur de charge est mort avec la cible (`set -e`, un
+   `curl` en échec, exit 56). Le trafic tombait à zéro pour deux raisons
+   mélangées. Corrigé : il survit désormais à sa cible, comme de vrais
+   utilisateurs qui, eux, continuent d'appeler.
+4. **Et la plus utile : ne pas ouvrir Grafana en premier.** Les panneaux
+   *Trafic*, *Erreurs* et *Latence* reposent sur `rate(...[1m])` : ils ont
+   besoin d'une minute avant de refléter quoi que ce soit. Au second incident,
+   cinq secondes après l'arrêt de la base, le panneau *Erreurs* affichait
+   encore **0,000 %** en toute bonne foi — pendant que `docker ps -a` montrait
+   déjà `todo-db  Exited (0) 5 seconds ago`.
+
+**Quel panneau a été le plus utile, lequel n'a rien apporté ?** *Disponibilité*
+a tout porté : c'est le seul immédiat, parce qu'il ne calcule aucun taux.
+*Latence p95* n'a rien apporté sur ces deux pannes — il n'aurait servi que sur
+la panne n° 5, la machine saturée. *Codes de statut* aurait fait la différence
+sur la base coupée si j'avais attendu une minute : les 503 y sont sans
+ambiguïté.
+
+**Qu'est-ce qu'un tableau de bord aurait fait gagner, en minutes ?** Sur ces
+deux pannes-là, franchement : rien. `docker ps -a` répond plus vite. Le tableau
+de bord sert à **savoir qu'il y a un problème** quand personne ne regarde, et à
+mesurer combien de temps il a duré — pas à identifier lequel dans les trente
+premières secondes. C'est la conclusion la moins attendue de la journée, et
+elle est écrite en haut du § 6 de la procédure.
+
+---
+
 ## Ce qui reste ouvert
 
-- **Les images ne sont publiées que sur un registry privé local.** Le token de la
-  CLI `gh` n'a pas le scope `write:packages` (voir chapitre 9). Un
-  `gh auth refresh -h github.com -s write:packages` puis un changement de la
-  ligne `IMAGE_PREFIX` du `.env` suffiraient à basculer sur GHCR — le
-  `docker-compose.prod.yml` n'a pas à bouger.
-- **`tests/` est vide et `npm test` n'existe pas.** Le TP l'annonce pour plus tard
-  dans la semaine ; les scénarios validés jusqu'ici l'ont été à la main via
-  `curl`, et sont reproduits dans ce journal. C'est le premier obstacle à une
-  pipeline utile : un stage `test` sans test est un stage vert qui ne prouve rien.
-- **Le tag des images est encore manuel** (`1.0.0` posé à la main au chapitre 9).
-  La règle « un artefact construit une fois, tagué par `sha` de commit, promu
-  ensuite » attend la pipeline.
-- **Aucune limite de ressources** (`deploy.resources.limits`) n'est posée sur les
-  services.
+### Refermé au jour 3
+
+- ~~**Les images ne sont publiées que sur un registry privé local**, faute du
+  scope `write:packages` sur le token `gh`.~~ La pipeline n'a pas besoin de ce
+  token : le `GITHUB_TOKEN` du run publie sur GHCR et expire avec le job.
+- ~~**`tests/` est vide et `npm test` n'existe pas.**~~ 43 tests : 22 unitaires,
+  21 d'intégration contre un vrai PostgreSQL. Et la preuve qu'ils ne sont pas
+  décoratifs — cassés exprès, ils rougissent.
+- ~~**Le tag des images est encore manuel.**~~ Tagué au sha du commit, par la
+  pipeline, jamais deux fois le même. C'est ce qui rend le retour arrière
+  trivial (2 s mesurées).
+
+### Toujours ouvert
+
+- **Aucune sauvegarde de la base.** Le volume `pgdata` est la seule copie des
+  données. Un `docker volume rm` de trop, et rien ne les ramène. C'est le
+  premier manque à combler pour un vrai service, et il est écrit noir sur blanc
+  au § 7 de la procédure de déploiement.
+- **Aucune limite de ressources** (`deploy.resources.limits`) sur les services
+  de la stack. La panne n° 5 de l'exercice d'astreinte le montre bien : rien
+  n'empêche un conteneur voisin de prendre tout le CPU de la machine.
+- **Le déploiement coupe le service quelques secondes.** `docker compose up -d`
+  arrête l'ancien conteneur avant de démarrer le nouveau. Un déploiement bleu-
+  vert ou progressif est ce que le jour 4 doit apporter, avec Kubernetes.
+- **Le runner self-hosted tourne dans un `nohup`**, pas en service système. Un
+  redémarrage du serveur, et les jobs restent `Queued` indéfiniment, sans
+  message d'erreur. Le § 7 de la procédure dit comment le relancer, mais
+  `svc.sh install` (qui demande les droits root) serait la vraie réponse.
+- **La passation de la phase 10 a été jouée seul**, les deux rôles tenus par la
+  même personne. La procédure n'a donc jamais été confrontée à quelqu'un qui ne
+  l'avait pas écrite — le seul test qui la valide vraiment.
