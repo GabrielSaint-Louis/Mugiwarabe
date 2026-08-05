@@ -1206,6 +1206,82 @@ mesurer combien de temps il a duré — pas à identifier lequel dans les trente
 premières secondes. C'est la conclusion la moins attendue de la journée, et
 elle est écrite en haut du § 6 de la procédure.
 
+## Après coup — les vérifications qui manquaient
+
+En relisant le rendu contre la grille d'évaluation, trois choses étaient
+affirmées sans preuve. Elles ont été jouées pour de vrai.
+
+### Les cinq signatures de panne sont maintenant mesurées
+
+Le tirage au sort de la phase 10 n'avait donné que les pannes 1 et 2 : les trois
+autres lignes du tableau de la procédure étaient raisonnées. Déclenchées
+délibérément, elles ont donné ceci — **une des trois était fausse.**
+
+| Panne | Ce qui était écrit | Ce qui a été observé |
+| --- | --- | --- |
+| 3 — réseau coupé | `up=0`, conteneur `Up` | ✅ exact, **plus** deux détails manquants : le conteneur se déclare `Up (healthy)`, et ses logs ne contiennent **aucune erreur** |
+| 4 — sans configuration | `up=0`, `Exited (1)` | ✅ exact, mais le message utile est en **ligne 5 sur 17** — `--tail 10` ne l'affiche pas |
+| 5 — machine saturée | « le p95 explose, `up` clignote, timeouts » | ❌ **faux.** `up` reste à 1, 0 % d'erreur. Seul le débit bouge : 21,6 → 14,6 req/s (−32 %), p95 40 → 48 ms |
+
+La panne 5 est la plus instructive du lot : c'est la seule qui n'allume aucun
+voyant. Elle ne se voit qu'en comparant au tableau de relevés ci-dessus — sans
+valeur de référence, 14,6 req/s ne veut rien dire.
+
+Celle du réseau coupé est la plus déroutante : Docker affiche `healthy` parce
+que le `HEALTHCHECK` interroge `127.0.0.1` depuis l'intérieur du conteneur, et
+réussit toujours — pendant que plus personne au monde ne peut joindre
+l'application.
+
+### Les trois chemins d'échec de la pipeline, éprouvés en cassant `main`
+
+Trois commits volontairement fautifs, poussés sur `main` puis révertés.
+
+| Scénario | Résultat | Production |
+| --- | --- | --- |
+| Secret `DEPLOY_PORT` mal orthographié | seul `Deploiement` rouge ; clé privée absente du log, **8 secrets masqués** | intacte |
+| `/health` pointé sur un port mort | job rouge avec `::error::`, `compose ps` et logs affichés | **nouvelle version déjà en place** |
+| Identifiant de registry retiré | seul `Image Docker` rouge, `Deploiement` `skipped` | intacte |
+
+Deux enseignements, tous deux corrigés dans le dépôt :
+
+1. **Un secret mal orthographié ne provoque aucune erreur côté GitHub** : il
+   devient silencieusement une chaîne vide. Le job échouait bien, mais sur
+   `scp: bad port "-r"` — un message qui envoie chercher une faute de syntaxe
+   dans la commande alors que le problème est un nom mal écrit trente lignes
+   plus haut. Quatre lignes en tête du job disent maintenant lequel manque.
+2. **Un `Deploiement` rouge ne veut pas dire « rien n'a été déployé ».** Quand
+   c'est l'étape de vérification qui échoue, la nouvelle version tourne déjà.
+   Supposer l'inverse ferait revenir en arrière depuis une version qui n'est pas
+   celle qu'on croit.
+
+### Deux bonus
+
+- **Retour arrière depuis la pipeline** (`.github/workflows/rollback.yml`) : un
+  sha, une raison, et c'est le même `apply.sh` au bout. Plus besoin de la clé
+  privée ni du dépôt, et le geste laisse une trace horodatée — ce qu'un `ssh`
+  dans un terminal ne laisse nulle part.
+- **Deux alertes Grafana**, chaque seuil justifié par une mesure plutôt que par
+  une intuition :
+
+| Alerte | Seuil | Pourquoi ce seuil |
+| --- | --- | --- |
+| API injoignable | `up = 0` pendant **1 min** | `up` bascule en 4 s, on pourrait alerter en 10 — mais un déploiement normal coupe 2 à 10 s, et une alerte qui sonne à chaque mise en production n'est plus lue au bout de trois jours |
+| Erreurs serveur | **> 5 % pendant 5 min** | c'est exactement le critère de retour arrière du § 4 de la procédure. Repères mesurés : 0,000 % en marche normale, 65 % base coupée — il n'y a rien entre les deux |
+
+Testées : `docker stop todo-api` → alerte `firing` en **70 secondes**, pendant
+que celle du taux d'erreur restait `inactive`. Les deux ne se déclenchent pas
+sur le même événement.
+
+### Ce que la panne du runner a appris
+
+Entre deux scénarios, le job `Deploiement` est resté **11 minutes en `Queued`**
+alors que l'API GitHub affichait `status=online busy=false` et que le process
+tournait. Le § 7 de la procédure prévoyait le cas « runner arrêté » ; il ne
+prévoyait pas « runner qui se croit vivant ». Un redémarrage l'a débloqué.
+
+C'est aussi la démonstration que le `nohup` est une solution provisoire :
+`svc.sh install` reste la vraie réponse.
+
 ---
 
 ## Ce qui reste ouvert
@@ -1236,8 +1312,9 @@ elle est écrite en haut du § 6 de la procédure.
   vert ou progressif est ce que le jour 4 doit apporter, avec Kubernetes.
 - **Le runner self-hosted tourne dans un `nohup`**, pas en service système. Un
   redémarrage du serveur, et les jobs restent `Queued` indéfiniment, sans
-  message d'erreur. Le § 7 de la procédure dit comment le relancer, mais
-  `svc.sh install` (qui demande les droits root) serait la vraie réponse.
+  message d'erreur — et ça n'est pas théorique, c'est arrivé une fois dans la
+  journée sans même un redémarrage. `svc.sh install` (qui demande les droits
+  root) serait la vraie réponse.
 - **La passation de la phase 10 a été jouée seul**, les deux rôles tenus par la
   même personne. La procédure n'a donc jamais été confrontée à quelqu'un qui ne
   l'avait pas écrite — le seul test qui la valide vraiment.
