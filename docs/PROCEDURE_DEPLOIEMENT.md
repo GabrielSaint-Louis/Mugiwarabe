@@ -188,6 +188,9 @@ arrière trop vite.
 ```bash
 # 1. Quelle version tourne en ce moment
 cible 'grep ^TAG= /srv/todo/.env'
+#    Ce fichier ne peut pas mentir : apply.sh ne l'écrit qu'APRÈS avoir
+#    téléchargé l'image avec succès. Un déploiement qui échoue au pull le
+#    laisse intact. Voir l'encadré ci-dessous.
 
 # 2. La version d'avant, dans l'historique de main
 git log --format='%H  %s' -5 main
@@ -195,6 +198,14 @@ git log --format='%H  %s' -5 main
 # 3. On y revient
 cible '/srv/todo/apply.sh <sha-de-la-version-d-avant>'
 ```
+
+> **Un sha qui n'a pas d'image ne casse rien.** Tous les commits de `main` n'ont
+> pas d'image publiée : seuls les commits **fusionnés** en ont une. Si vous vous
+> trompez de sha à 3 h du matin, `apply.sh` échoue sur le téléchargement, dit
+> quelle commande liste les versions déployables, et **s'arrête là** : la
+> version en place continue de tourner et le `.env` n'a pas bougé. Vérifié le
+> 5 août 2026 avec un sha de quarante zéros — `exit 1`, conteneur intact,
+> `/health` toujours à 200.
 
 ### La même chose sans terminal
 
@@ -539,3 +550,4 @@ d'un moment où quelqu'un s'est trouvé bloqué devant ce document.
 | 2026-08-05, **après vérification de la panne 3** | Rien ne disait que le conteneur reste **`Up (healthy)`** : son `HEALTHCHECK` interroge `127.0.0.1` depuis l'intérieur et réussit toujours. Ni que les logs ne contiennent **aucune erreur**. Un `docker ps` lu vite fait chercher ailleurs. | Les deux ajoutés au § 6.3, avec la combinaison qui identifie la panne : `up = 0` **et** conteneur `Up`. |
 | 2026-08-05, **après vérification de la panne 4** | La règle « lire les logs par la fin » était fausse pour un conteneur qui plante au démarrage : le message utile était en **ligne 5 sur 17**, et `--tail 10` n'affichait que la pile d'appels. | Deux règles au lieu d'une, choisies par le statut : `Exited (0)` → par la fin, `Exited (1)` → par le début. |
 | 2026-08-05, **après le 2ᵉ incident réel** | La procédure envoyait vers le tableau de bord en premier. Or les panneaux 2 à 4 reposent sur `rate([1m])` : au 2ᵉ incident, cinq secondes après l'arrêt de la base, le panneau *Erreurs* affichait encore 0,000 %. `docker ps -a`, lui, montrait déjà `todo-db  Exited (0) 5 seconds ago`. | Ajout de l'encadré sur la latence du tableau de bord, et inversion explicite de l'ordre : les deux commandes d'abord, Grafana ensuite. |
+| 2026-08-05, **en se servant du retour arrière** | Toute la procédure fait lire `grep ^TAG= /srv/todo/.env` pour répondre à « quelle version tourne ? ». Or `apply.sh` écrivait ce sha **avant** de télécharger l'image : un retour arrière vers un sha sans image laissait le `.env` annoncer une version qui ne tournait pas. Le seul fichier que la procédure fait lire pendant une panne mentait, et il mentait précisément dans le cas où on le lit. | `apply.sh` télécharge d'abord, n'écrit qu'ensuite. Deux encadrés ajoutés au § 4 : le `.env` est désormais fiable par construction, et un sha sans image échoue sans rien changer. |
