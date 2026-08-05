@@ -134,3 +134,118 @@ jobs:
       - name: Publication de l'image
         if: github.ref == 'refs/heads/main'
         run: docker push "$IMAGE:${{ github.sha }}"
+
+  # ---------------------------------------------------------------------------
+  # Stage 3 - le deploiement. C'est l'etape qui manquait hier soir : une image
+  # neuve dormait sur le registry pendant que le serveur continuait de faire
+  # tourner, sans le savoir, la version d'il y a deux semaines.
+  #
+  # Ce job est le seul a tourner en self-hosted, et pour une raison precise :
+  # la machine cible n'a pas d'adresse publique, aucun runner GitHub ne peut la
+  # joindre. Chaque job choisit son runner, et seul celui qui doit atteindre une
+  # machine privee tourne ici.
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: Deploiement
+    # Rien ne se deploie avant que l'image existe sur le registry.
+    needs: [build]
+    runs-on: self-hosted
+    # Le garde-fou. Ce depot est public, et un runner self-hosted execute sur
+    # une vraie machine ce que la pipeline lui dit d'executer. Cette ligne
+    # separe "ma machine execute ce que j'ai fusionne moi-meme" de "ma machine
+    # execute ce que n'importe qui a propose".
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      # Pour que la machine cible puisse tirer l'image depuis GHCR, on lui prete
+      # le jeton du run. Il expire avec le job : aucun mot de passe de registry
+      # ne reste sur la machine cible.
+      packages: read
+    steps:
+      - uses: actions/checkout@v7
+
+      # La cle privee arrive en memoire, pas sur le disque. C'est le piege
+      # classique : une cle ecrite dans un fichier temporaire finit par trainer
+      # sur le disque du runner — et ce runner-ci n'est pas jetable, il tourne
+      # sur une machine qui sert a autre chose. L'agent SSH garde la cle le
+      # temps de la session et la prete a ssh et scp, sans qu'elle touche le
+      # systeme de fichiers.
+      - name: Charger la cle dans l'agent SSH
+        uses: webfactory/ssh-agent@v0.10.0
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
+
+      # Sans cette empreinte, ssh s'arreterait sur sa question interactive
+      # ("Are you sure you want to continue connecting?") et le job resterait
+      # bloque jusqu'au timeout, sans message clair.
+      - name: Faire connaissance avec la machine cible
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          # On retire l'ancienne empreinte avant d'ecrire la nouvelle. Deux
+          # raisons : le fichier ne gonfle pas d'une ligne identique a chaque
+          # deploiement, et surtout une machine cible reconstruite (nouvelle
+          # cle d'hote) ne fait pas echouer tous les deploiements suivants sur
+          # un "REMOTE HOST IDENTIFICATION HAS CHANGED".
+          ssh-keygen -R "[${{ secrets.DEPLOY_HOST }}]:${{ secrets.DEPLOY_PORT }}" >/dev/null 2>&1 || true
+          ssh-keyscan -p ${{ secrets.DEPLOY_PORT }} -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+          chmod 600 ~/.ssh/known_hosts
+
+      # Le compose.yml est du code : il vit dans le depot, il part sur la
+      # machine par la pipeline, et il ne se modifie jamais directement en
+      # production. Le .env, lui, ne bouge pas : il a ete pose une fois a la
+      # main et contient les mots de passe.
+      - name: Envoyer la description de la stack
+        run: |
+          scp -P ${{ secrets.DEPLOY_PORT }} deploy/compose.yml \
+            ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/srv/todo/compose.yml
+
+      - name: Demarrer la nouvelle version
+        run: |
+          # Le jeton passe par l'entree standard, jamais en argument : un
+          # `docker login -p <jeton>` se retrouverait dans l'historique du shell
+          # et dans la liste des process de la machine cible.
+          ssh -p ${{ secrets.DEPLOY_PORT }} \
+              ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \
+              "docker login ghcr.io -u ${{ github.actor }} --password-stdin" <<< "${{ secrets.GITHUB_TOKEN }}"
+
+          # LA commande de deploiement, et elle tient en une ligne. `up -d`
+          # compare l'etat voulu a l'etat reel et ne touche que ce qui a change :
+          # rejouee dix fois, elle laisse un seul conteneur todo-api, toujours a
+          # jour, la ou une sequence naive de docker run planterait sur un nom
+          # deja pris.
+          ssh -p ${{ secrets.DEPLOY_PORT }} \
+              ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \
+              "cd /srv/todo && TAG=${{ github.sha }} docker compose up -d --remove-orphans"
+
+      # Un deploiement qui ne verifie rien n'est pas un deploiement, c'est un
+      # espoir. On interroge l'API DE L'EXTERIEUR de la machine cible, par le
+      # port qu'elle publie : c'est le chemin qu'emprunte un vrai utilisateur.
+      #
+      # 13000 et pas 3000 : la machine cible publie son port 3000 sur 13000 cote
+      # hote, parce que 3000 appartient deja a un autre site sur cette machine.
+      # Cette valeur n'est pas un secret, elle reste donc en clair ici — a la
+      # difference de l'adresse, du port SSH et de l'utilisateur.
+      - name: Verifier que l'API repond
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:13000/health | grep -q '"status":"ok"'; then
+              echo "L'API repond apres $i tentative(s)."
+              curl -s http://127.0.0.1:13000/health
+              exit 0
+            fi
+            sleep 2
+          done
+
+          # Une minute sans reponse : le job echoue, et il laisse de quoi
+          # comprendre pourquoi. Un `exit 1` nu obligerait a se connecter a la
+          # machine pour apprendre ce que ces trois commandes disent deja.
+          echo "::error::L'API ne repond pas apres 60 secondes. Deploiement en echec."
+          ssh -p ${{ secrets.DEPLOY_PORT }} ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \
+            'cd /srv/todo && docker compose ps && echo "--- logs todo-api ---" && docker compose logs --tail=40 todo-api'
+          exit 1
+
+      - name: Ce qui tourne maintenant
+        run: |
+          echo "Version deployee : ${{ github.sha }}"
+          ssh -p ${{ secrets.DEPLOY_PORT }} ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \
+            "docker inspect -f 'image en cours -> {{.Config.Image}}' todo-api"
