@@ -92,9 +92,34 @@ c'est qu'il s'est passé quelque chose d'anormal — allez au § 3.
 
    **Attendu :** `TAG=<les 40 caractères du sha du dernier commit sur main>`
 
-Si le job `Deploiement` est rouge, il a déjà affiché `docker compose ps` et les
-40 dernières lignes de log de l'API : lisez-les avant toute chose, la réponse y
-est neuf fois sur dix.
+### Quand un job est rouge
+
+> **Un job `Deploiement` rouge ne veut PAS dire « rien n'a été déployé ».**
+> Vérifié le 5 août 2026 : la nouvelle version était déjà en place et en train
+> de servir, seule l'étape de vérification avait échoué. La première chose à
+> faire devant un déploiement rouge est donc de regarder **ce qui tourne**, pas
+> de supposer que la production est restée à l'ancienne version :
+>
+> ```bash
+> cible 'grep ^TAG= /srv/todo/.env'
+> ```
+
+Le job rouge a déjà affiché `docker compose ps` et les dernières lignes de log
+de l'API : lisez-les avant toute chose, la réponse y est neuf fois sur dix.
+
+Selon le job qui rougit, ce qui est en jeu diffère — mesuré en cassant `main`
+exprès, une fois par cas :
+
+| Job rouge | Ce qui a été fait | État de la production |
+| --- | --- | --- |
+| `Lint`, `Tests unitaires`, `Tests d'integration` | rien | intacte |
+| `Image Docker` | rien n'est publié, `Deploiement` est `skipped` | intacte |
+| `Deploiement`, avant l'étape « Démarrer » | rien | intacte |
+| `Deploiement`, à l'étape « Vérifier » | **la nouvelle version tourne déjà** | **modifiée** |
+
+Le dernier cas est le seul qui demande une décision : soit le problème vient de
+la vérification elle-même, soit la nouvelle version est réellement en panne — et
+c'est alors le § 4 qui s'applique.
 
 ---
 
@@ -170,6 +195,17 @@ git log --format='%H  %s' -5 main
 # 3. On y revient
 cible '/srv/todo/apply.sh <sha-de-la-version-d-avant>'
 ```
+
+### La même chose sans terminal
+
+Si vous n'avez ni la clé privée, ni le dépôt, ni l'envie de taper du SSH à 3 h
+du matin : onglet **Actions** → workflow **Retour arriere** → *Run workflow*.
+Il demande le sha et une raison, refuse un sha court avec un message explicite,
+et fait exactement la même chose — c'est le même `apply.sh` au bout.
+
+Deux avantages sur la voie manuelle : n'importe qui ayant accès au dépôt peut
+le déclencher, et le geste laisse une trace horodatée avec le nom de qui l'a
+lancé. Un `ssh` dans un terminal ne laisse rien.
 
 **Vérification :** `curl -s http://127.0.0.1:13000/health` répond
 `{"status":"ok",...}`, et le comportement fautif a disparu. Notez l'heure : le
@@ -498,6 +534,7 @@ d'un moment où quelqu'un s'est trouvé bloqué devant ce document.
 | 2026-08-05, **après le 1ᵉʳ incident réel** | Le tableau disait « `todo-api` absent » pour 6.1 et « `Exited`ou `Restarting` » pour 6.4 — or 6.1 laisse aussi un conteneur `Exited`. Les deux lignes étaient indiscernables au moment où il fallait choisir. | Le critère devient le **code de sortie** : `Exited (0)` = arrêt propre (6.1), `Exited (1)` = plantage au démarrage (6.4). Ajouté au tableau et au § 6.1. |
 | 2026-08-05, **après le 1ᵉʳ incident réel** | Rien ne disait de lire les logs par la fin. Huit lignes `ENOTFOUND todo-db` d'un incident précédent précédaient la ligne utile et pointaient vers la mauvaise section. | Ajout de l'avertissement sous le réflexe n° 1, et passage de `--tail=40` à `--tail 10`. |
 | 2026-08-05, **après le 1ᵉʳ incident réel** | Le panneau *Trafic* était lu comme « plus personne n'appelle », alors que c'est le générateur de charge qui était mort avec la panne (`set -e` + `curl` en échec). | `scripts/charge.sh` survit désormais à sa cible, et la procédure prévient de ne pas conclure depuis ce panneau seul. |
+| 2026-08-05, **après avoir cassé `main` exprès 3 fois** | Rien ne disait ce qu'un job rouge implique pour la production. Or un `Deploiement` qui échoue à l'étape de vérification laisse **la nouvelle version en train de tourner** — supposer l'inverse ferait revenir en arrière une version qui n'est pas celle qu'on croit. | Ajout du tableau « quand un job est rouge » au § 2, et du réflexe `grep ^TAG=` avant toute décision. |
 | 2026-08-05, **après vérification des pannes 3, 4 et 5** | Les signatures 6.3, 6.4 et 6.5 étaient **raisonnées, pas observées** — le tirage au sort n'avait donné que les pannes 1 et 2. Les trois ont été déclenchées délibérément, et 6.5 était franchement fausse : annoncée avec un `up` qui clignote et des timeouts, elle ne produit en réalité aucune erreur et aucun changement de `up`. | Les cinq lignes du tableau sont désormais mesurées. 6.5 devient « aucune alarme, seulement −32 % de débit », avec ses valeurs avant/pendant. |
 | 2026-08-05, **après vérification de la panne 3** | Rien ne disait que le conteneur reste **`Up (healthy)`** : son `HEALTHCHECK` interroge `127.0.0.1` depuis l'intérieur et réussit toujours. Ni que les logs ne contiennent **aucune erreur**. Un `docker ps` lu vite fait chercher ailleurs. | Les deux ajoutés au § 6.3, avec la combinaison qui identifie la panne : `up = 0` **et** conteneur `Up`. |
 | 2026-08-05, **après vérification de la panne 4** | La règle « lire les logs par la fin » était fausse pour un conteneur qui plante au démarrage : le message utile était en **ligne 5 sur 17**, et `--tail 10` n'affichait que la pile d'appels. | Deux règles au lieu d'une, choisies par le statut : `Exited (0)` → par la fin, `Exited (1)` → par le début. |
