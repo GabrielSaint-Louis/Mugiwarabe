@@ -73,11 +73,76 @@ jobs:
       - run: npm test
 
   # ---------------------------------------------------------------------------
+  # Stage 1c - les tests qui touchent vraiment la base.
+  #
+  # Le deploiement est automatique depuis la phase 4 : plus rien ne s'interpose
+  # entre un commit et la production. Il devient donc urgent que la pipeline
+  # sache dire non, et un test unitaire ne le sait pas — la regression de la
+  # phase 5 est passee devant 22 d'entre eux sans en reveiller un seul.
+  #
+  # Ce job reste sur ubuntu-latest : il n'a besoin de rien de local, juste
+  # d'une base jetable a cote de lui.
+  # ---------------------------------------------------------------------------
+  test-integration:
+    name: Tests d'integration
+    runs-on: ubuntu-latest
+
+    # GitHub demarre ce conteneur a cote du job, pour toute sa duree, puis le
+    # detruit. Meme principe que le docker-compose du jour 1, sauf que GitHub
+    # s'en charge. La base est jetable, jamais la vraie : chaque execution
+    # repart d'un etat identique, connu, vide.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          # Lues par l'image postgres elle-meme, au tout premier demarrage :
+          # c'est elle qui cree l'utilisateur et la base, pas notre code.
+          POSTGRES_USER: todo_user
+          POSTGRES_PASSWORD: todo_pass
+          POSTGRES_DB: todo_test
+        ports:
+          - 5432:5432
+        # Sans ce garde-fou, les tests demarrent parfois pendant que Postgres
+        # finit son initdb, et echouent une fois sur trois sans qu'on
+        # comprenne pourquoi.
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # Un `services:` place le conteneur sur le meme reseau que le job : on le
+      # joint par localhost, pas par son nom de service comme dans un compose.
+      DB_HOST: localhost
+      DB_PORT: 5432
+      DB_NAME: todo_test
+      DB_USER: todo_user
+      DB_PASSWORD: todo_pass
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+
+      # Le schema doit exister avant que le premier test ne tourne, sinon tous
+      # echouent sur un "relation tasks does not exist" et on cherche le bug au
+      # mauvais endroit.
+      - run: npm run migrate
+
+      - run: npm run test:integration
+
+  # ---------------------------------------------------------------------------
   # Stage 2 - on ne construit une image que si le lint ET les tests sont verts.
   # ---------------------------------------------------------------------------
   build:
     name: Image Docker
-    needs: [lint, test]
+    needs: [lint, test, test-integration]
     runs-on: ubuntu-latest
     permissions:
       contents: read
