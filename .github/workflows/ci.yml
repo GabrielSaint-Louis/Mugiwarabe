@@ -229,6 +229,28 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Un secret absent ou mal orthographie ne provoque PAS d'erreur : GitHub
+      # le remplace silencieusement par une chaine vide. Verifie le 5 aout 2026
+      # en ecrivant DEPLOY_PORTT au lieu de DEPLOY_PORT — le job echouait bien,
+      # mais sur `scp: bad port "-r"`, un message qui envoie chercher une faute
+      # de syntaxe dans la commande alors que le probleme est ailleurs.
+      #
+      # Ces quatre lignes transforment dix minutes de perplexite en une phrase.
+      - name: Les secrets sont-ils tous la
+        env:
+          H: ${{ secrets.DEPLOY_HOST }}
+          P: ${{ secrets.DEPLOY_PORT }}
+          U: ${{ secrets.DEPLOY_USER }}
+          K: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          for nom in H P U K; do
+            if [ -z "${!nom}" ]; then
+              echo "::error::Le secret DEPLOY_* correspondant a '$nom' est vide ou absent. Verifier son orthographe dans Settings > Secrets and variables > Actions ET dans ce workflow."
+              exit 1
+            fi
+          done
+          echo "Les quatre secrets de deploiement sont presents."
+
       # La cle privee arrive en memoire, pas sur le disque. C'est le piege
       # classique : une cle ecrite dans un fichier temporaire finit par trainer
       # sur le disque du runner — et ce runner-ci n'est pas jetable, il tourne
