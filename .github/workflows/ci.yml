@@ -266,7 +266,7 @@ jobs:
           # jamais directement en production — un panneau bricole a la souris
           # pendant une astreinte serait ecrase au deploiement suivant, ce qui
           # est exactement le comportement voulu.
-          scp -P ${{ secrets.DEPLOY_PORT }} -r \
+          scp -P ${{ secrets.DEPLOY_PORTT }} -r \
             deploy/compose.yml deploy/prometheus.yml deploy/apply.sh deploy/grafana \
             ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/srv/todo/
           ssh -p ${{ secrets.DEPLOY_PORT }} \
