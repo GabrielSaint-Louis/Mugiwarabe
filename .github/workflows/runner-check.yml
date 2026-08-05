@@ -1,0 +1,49 @@
+name: Ou tourne ce job
+
+# Phase 3, la preuve. Deux jobs identiques, un seul mot qui change : `runs-on`.
+# L'un s'execute sur la machine qui heberge la cible, l'autre dans un centre de
+# donnees GitHub. Les mettre cote a cote rend visible ce que la doc explique en
+# trois paragraphes.
+#
+# Declenchement MANUEL et rien d'autre. C'est le garde-fou de la phase 3 : ce
+# depot est public, un runner self-hosted execute ce que la pipeline lui dit
+# d'executer sur une vraie machine, et n'importe qui peut proposer une pull
+# request. Sans `push:` ni `pull_request:` ici, aucun code propose de
+# l'exterieur ne peut atteindre cette machine par ce fichier.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  chez-moi:
+    name: self-hosted
+    runs-on: self-hosted
+    steps:
+      - name: Qui suis-je, et qui tourne a cote de moi
+        run: |
+          echo "hostname : $(hostname)"
+          echo "--- conteneurs visibles depuis ce runner ---"
+          docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
+          echo "--- la machine cible est-elle joignable d'ici ---"
+          # Le runner et la machine cible vivent sur le meme hote : c'est toute
+          # la raison d'etre de ce runner. Un runner GitHub, lui, n'a aucun
+          # chemin vers une machine qui n'a pas d'adresse publique.
+          nc -z 127.0.0.1 2222 && echo "port SSH 2222 de vm-prod : ouvert"
+
+  chez-github:
+    name: ubuntu-latest
+    runs-on: ubuntu-latest
+    steps:
+      - name: Le meme job, ailleurs
+        run: |
+          echo "hostname : $(hostname)"
+          echo "--- conteneurs visibles depuis ce runner ---"
+          docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
+          echo "--- la machine cible est-elle joignable d'ici ---"
+          # `|| true` : l'echec est le resultat attendu, pas un incident. Une
+          # machine derriere une box, sans adresse publique, est injoignable
+          # depuis un centre de donnees GitHub, et c'est precisement pour ca
+          # que le job de deploiement tourne self-hosted.
+          nc -z -w 3 127.0.0.1 2222 && echo "joignable" || echo "injoignable, et c'est normal"
