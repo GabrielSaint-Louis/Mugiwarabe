@@ -1,0 +1,34 @@
+# Configuration de Prometheus. Elle vit dans le depot, elle part sur la machine
+# cible par la pipeline, et elle ne se modifie jamais directement en
+# production : c'est du code comme le reste.
+
+global:
+  # 5 secondes, c'est court. En production reelle on est plutot a 15 ou 30 :
+  # chaque scrape coute une requete HTTP a l'application et une serie de points
+  # a stocker. Ici on veut voir les effets pendant l'exercice, pas attendre une
+  # demi-minute qu'un panneau bouge — et c'est aussi ce qui permet a `up` de
+  # tomber a zero en moins de quinze secondes quand on arrete un conteneur.
+  scrape_interval: 5s
+  scrape_timeout: 3s
+
+scrape_configs:
+  - job_name: todo-api
+    # Le chemin par defaut est deja /metrics, mais l'ecrire evite d'avoir a se
+    # souvenir du defaut le jour ou une cible expose autre chose.
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['todo-api:3000']
+        # Une etiquette posee ici se retrouve sur toutes les series de la
+        # cible. Pratique le jour ou une deuxieme instance apparait.
+        labels:
+          env: production
+
+  # Prometheus se surveille lui-meme. Ca ne coute rien, et le jour ou les
+  # panneaux sont vides, la premiere question est "est-ce l'application qui ne
+  # repond plus, ou Prometheus qui ne collecte plus ?". Cette cible repond.
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']
+# Le nom du service, jamais une adresse IP. C'est le DNS interne du reseau
+# compose qui resout todo-api, et cette adresse survit a un redeploiement la ou
+# une IP de conteneur change a chaque recreation.

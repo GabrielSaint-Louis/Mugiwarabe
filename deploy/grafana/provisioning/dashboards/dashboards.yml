@@ -1,0 +1,20 @@
+# Ou Grafana va chercher les tableaux de bord decrits en fichier.
+#
+# Le tableau de bord est un livrable au meme titre que le code : il vit dans le
+# depot, il part sur la machine cible par la pipeline, et il se relit dans une
+# pull request. Un tableau de bord construit a la souris ne se relit nulle part.
+apiVersion: 1
+
+providers:
+  - name: todo-api
+    orgId: 1
+    folder: ''
+    type: file
+    # Une modification faite a la souris est ecrasee au prochain demarrage.
+    # C'est voulu : la source de verite est le fichier du depot, et un panneau
+    # bricole en pleine astreinte ne doit pas survivre en silence.
+    disableDeletion: false
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false
