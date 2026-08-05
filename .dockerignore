@@ -21,6 +21,13 @@ Dockerfile*
 .dockerignore
 docker-compose*.yml
 
+# Tout l'outillage de deploiement du jour 3, et surtout la cle privee qui y
+# vit. `Dockerfile*` ci-dessus ne couvre que la racine : sans cette ligne,
+# deploy/deploy_key partirait dans le contexte de build, et il suffirait d'un
+# `COPY . .` maladroit pour qu'une cle d'acces a la production se retrouve
+# dans une image publique.
+deploy
+
 # Le service Python a son propre contexte de build (stats_api/Dockerfile).
 stats_api
 

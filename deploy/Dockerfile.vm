@@ -1,0 +1,56 @@
+# =============================================================================
+#  Dockerfile.vm : la machine de production, en maquette
+#
+#  Une vraie machine de prod coute de l'argent et demande un compte chez un
+#  hebergeur. On la remplace par un conteneur qui embarque son propre Docker et
+#  un serveur SSH. Ce n'est pas une vraie machine, et rien ici ne fait semblant
+#  du contraire : du point de vue de la pipeline, en revanche, tout est
+#  identique. Une adresse, un port, une cle, un utilisateur, un Docker a
+#  l'autre bout.
+#
+#  Ce qui compte, c'est l'isolation : le Docker de cette machine ne voit pas les
+#  conteneurs du poste, et les conteneurs de developpement ne voient pas les
+#  siens. Une panne en "production" ne touche donc jamais l'environnement de
+#  travail — et sur cette machine-ci, qui heberge un vrai site en pm2, ce n'est
+#  pas une precaution theorique.
+# =============================================================================
+
+# docker:28-dind = l'image officielle "Docker in Docker" : un Docker complet
+# qui tourne a l'interieur d'un conteneur, avec son propre daemon.
+FROM docker:28-dind
+
+# openssh-server : le programme qui ecoute les connexions SSH entrantes.
+# ssh-keygen -A : genere les cles d'hote du serveur, sans lesquelles sshd
+# refuse de demarrer.
+RUN apk add --no-cache openssh-server && ssh-keygen -A
+
+RUN mkdir -p /root/.ssh && chmod 700 /root/.ssh
+
+# La cle PUBLIQUE du deploiement, la seule qui aura le droit d'entrer. La
+# privee, elle, ne quitte jamais le poste et le secret GitHub.
+COPY deploy_key.pub /root/.ssh/authorized_keys
+RUN chmod 600 /root/.ssh/authorized_keys
+
+# Les deux regles qui decident qui entre, ecrites explicitement plutot que
+# laissees au defaut de la distribution (qui peut changer d'une version a
+# l'autre sans prevenir) :
+#   - prohibit-password : root entre par cle, jamais par mot de passe
+#   - PasswordAuthentication no : personne n'entre par mot de passe, point
+#
+# Le compte root de cette image porte deja "*" dans /etc/shadow, pas "!" : il
+# n'a pas de mot de passe mais il n'est pas verrouille, donc l'authentification
+# par cle passe sans avoir a le deverrouiller.
+RUN printf '\nPermitRootLogin prohibit-password\nPasswordAuthentication no\n' \
+       >> /etc/ssh/sshd_config
+
+# Sur une vraie machine, ce serait un compte de service dedie, membre du groupe
+# docker et de rien d'autre, jamais root. Ici la maquette est jetable et n'est
+# joignable que depuis la boucle locale de l'hote : la simplification est
+# assumee, pas ignoree.
+
+# sshd doit demarrer AVANT le daemon Docker : dockerd-entrypoint.sh ne rend
+# jamais la main, donc tout ce qui serait ecrit apres lui ne demarrerait jamais.
+RUN printf '#!/bin/sh\n/usr/sbin/sshd\nexec dockerd-entrypoint.sh "$@"\n' > /start.sh \
+    && chmod +x /start.sh
+
+ENTRYPOINT ["/start.sh"]

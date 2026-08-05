@@ -6,6 +6,19 @@ npm-debug.log*
 .env
 .env.local
 
+# --- Jour 3, phase 2 : la cle de deploiement ---------------------------------
+# Ces deux lignes s'ecrivent AVANT le premier `git add` de la phase, jamais
+# apres. Une cle privee poussee par erreur ne se rattrape pas avec un commit de
+# suppression : elle reste dans l'historique, et `git log -p` la retrouve.
+# Seule la cle PUBLIQUE (deploy_key.pub) est commitee, c'est son role.
+deploy/deploy_key
+deploy_key
+*.pem
+
+# Le runner self-hosted s'installe a cote du depot, mais si quelqu'un le pose
+# dedans, son jeton d'enregistrement ne doit pas partir avec.
+actions-runner/
+
 coverage/
 *.log
 .DS_Store

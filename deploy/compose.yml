@@ -1,0 +1,108 @@
+# =============================================================================
+#  La stack de production, telle qu'elle vit sur la machine cible dans /srv/todo
+#
+#  Ce fichier ressemble au docker-compose.yml du jour 1, avec une difference
+#  decisive : il ne CONSTRUIT plus l'image, il la telecharge, et la version est
+#  choisie de l'exterieur. Le code source n'existe pas sur la machine cible.
+#  Personne n'y fait git clone, personne n'y ouvre un editeur. Deux choses
+#  seulement y arrivent : des images, et des commandes pour les demarrer.
+#
+#  Le deploiement tient alors en une ligne, jouee sur la cible :
+#
+#      cd /srv/todo && TAG=<sha du commit> docker compose up -d
+#
+#  Et le retour arriere aussi, avec le sha d'avant. C'est tout l'interet du tag
+#  au sha : revenir en arriere ne demande ni build, ni pipeline, ni panique.
+#
+#  A cote de ce fichier vit un .env, copie une seule fois a la main. Il contient
+#  les mots de passe : il ne sort jamais du depot, et il n'y rentre jamais non
+#  plus.
+# =============================================================================
+name: todo-prod
+
+services:
+  todo-api:
+    # Nom de conteneur fixe : la pipeline, la procedure de deploiement et le
+    # script d'incident comptent tous les trois dessus. Un nom genere
+    # (todo-prod-todo-api-1) obligerait a le retrouver a chaque commande, a 3h
+    # du matin, dans un terminal.
+    container_name: todo-api
+
+    # ${TAG:?...} : si TAG est absent, compose refuse de demarrer avec ce
+    # message, au lieu de composer un nom d'image vide et de sortir une erreur
+    # de parsing incomprehensible. Une commande de deploiement mal tapee doit
+    # echouer franchement, jamais a moitie.
+    image: ghcr.io/gabrielsaint-louis/todo-api:${TAG:?TAG est obligatoire — TAG=<sha> docker compose up -d}
+
+    # unless-stopped et pas always : le conteneur revient apres un reboot de la
+    # machine, mais un `docker stop` volontaire (celui du script d'incident,
+    # par exemple) reste respecte. Avec `always`, la panne se reparerait toute
+    # seule et l'exercice d'astreinte n'aurait plus d'objet.
+    restart: unless-stopped
+
+    # Les mots de passe viennent du .env pose a la main sur la machine, jamais
+    # du depot.
+    env_file:
+      - .env
+
+    environment:
+      NODE_ENV: production
+      # Le nom du service, pas une IP : c'est le DNS interne du reseau compose
+      # qui le resout. Ecrit ici plutot que dans le .env parce que c'est une
+      # constante de topologie, pas un secret.
+      DB_HOST: todo-db
+      PORT: 3000
+
+    ports:
+      # A l'interieur de la machine cible, l'API ecoute bien sur 3000. C'est le
+      # `docker run` de la maquette (deploy/vm-prod.sh) qui la republie sur
+      # 13000 cote hote, parce que 3000 y est deja pris par un autre site.
+      - '3000:3000'
+
+    depends_on:
+      todo-db:
+        # service_healthy et pas service_started : Postgres accepte les
+        # connexions plusieurs secondes apres avoir demarre. Sans cette
+        # condition, l'API passe son initSchema en boucle d'erreurs au premier
+        # demarrage.
+        condition: service_healthy
+
+    networks:
+      - todo-prod
+
+  todo-db:
+    container_name: todo-db
+    image: postgres:16-alpine
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_DB: ${DB_NAME:?absent du .env}
+      POSTGRES_USER: ${DB_USER:?absent du .env}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?absent du .env}
+
+    # Aucun `ports:` : la base n'est joignable que depuis le reseau interne.
+    # Publier 5432 sur la machine cible n'apporterait rien et ouvrirait une
+    # porte de plus.
+
+    volumes:
+      # Volume nomme : les taches survivent a un redeploiement, a un retour
+      # arriere, et a un `docker compose down`. C'est la seule chose de cette
+      # stack qu'on ne peut pas reconstruire.
+      - pgdata:/var/lib/postgresql/data
+
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${DB_USER} -d ${DB_NAME}']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+    networks:
+      - todo-prod
+
+networks:
+  todo-prod:
+    name: todo-prod
+
+volumes:
+  pgdata:
