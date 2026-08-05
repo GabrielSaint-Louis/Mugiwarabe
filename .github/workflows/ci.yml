@@ -259,10 +259,16 @@ jobs:
       # machine par la pipeline, et il ne se modifie jamais directement en
       # production. Le .env, lui, ne bouge pas : il a ete pose une fois a la
       # main et contient les mots de passe.
-      - name: Envoyer la description de la stack
+      - name: Envoyer la description de la stack et de sa surveillance
         run: |
-          scp -P ${{ secrets.DEPLOY_PORT }} deploy/compose.yml \
-            ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/srv/todo/compose.yml
+          # -r pour le dossier grafana/ : la source de donnees et le tableau de
+          # bord sont du code eux aussi. Ils partent d'ici et ne se modifient
+          # jamais directement en production — un panneau bricole a la souris
+          # pendant une astreinte serait ecrase au deploiement suivant, ce qui
+          # est exactement le comportement voulu.
+          scp -P ${{ secrets.DEPLOY_PORT }} -r \
+            deploy/compose.yml deploy/prometheus.yml deploy/grafana \
+            ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/srv/todo/
 
       - name: Demarrer la nouvelle version
         run: |
