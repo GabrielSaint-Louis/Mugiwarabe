@@ -227,13 +227,25 @@ par relever la signature avant de toucher à quoi que ce soit** : les trois
 premières lignes se ressemblent au premier coup d'œil et se réparent
 différemment.
 
+**Les cinq signatures ci-dessous ont été observées, pas déduites** : chaque panne
+a été déclenchée pour de vrai le 5 août 2026, et les valeurs sont relevées.
+
 | Panne | `up` | Erreurs | `docker ps -a` sur la cible | Réparation |
 | --- | --- | --- | --- | --- |
 | 6.1 API arrêtée | **0** | pas de données | `todo-api` **`Exited (0)`** | § 6.1 |
-| 6.2 Base arrêtée | **1** | **~65 % de 503** | `todo-api` `Up`, `todo-db` **absent** | § 6.2 |
-| 6.3 API coupée du réseau | **0** | pas de données | `todo-api` **`Up`** | § 6.3 |
-| 6.4 API relancée sans configuration | **0** | pas de données | `todo-api` **`Exited (1)`** ou `Restarting` | § 6.4 |
-| 6.5 Machine saturée | 0 ou 1, clignote | timeouts | tout est `Up`, mais lent | § 6.5 |
+| 6.2 Base arrêtée | **1** | **65 % de 503** | `todo-api` `Up`, `todo-db` **absent** | § 6.2 |
+| 6.3 API coupée du réseau | **0** | pas de données | `todo-api` **`Up (healthy)`** | § 6.3 |
+| 6.4 API relancée sans configuration | **0** | pas de données | `todo-api` **`Exited (1)`** | § 6.4 |
+| 6.5 Machine saturée | **1** | **0 %** | tout est `Up`, plus des intrus | § 6.5 |
+
+> **La ligne 6.5 surprend, et c'est le résultat le plus utile du tableau.** Une
+> machine saturée ne déclenche *aucune* alarme évidente : `up` reste à 1, le
+> taux d'erreur reste à 0 %. Ce qui bouge, c'est le **débit** — mesuré, il est
+> passé de 21,6 à 14,6 req/s, soit −32 %, avec un p95 de 40 ms à 48 ms. Une
+> panne qui ne fait clignoter aucun voyant rouge et que seule une comparaison
+> avec l'état normal révèle. C'est pour ça que le tableau de relevés du
+> `README.md` existe : sans valeur de référence, ces chiffres ne veulent rien
+> dire.
 
 > **Les deux distinctions qui font gagner le plus de temps.**
 >
@@ -271,10 +283,23 @@ cible 'docker logs --tail 10 todo-api'
 > de temps il a duré. Il ne sert pas à identifier lequel dans les premières
 > secondes.
 
-**Lisez les logs par la fin.** Les lignes plus anciennes peuvent venir d'un
-incident précédent et vous envoyer sur une fausse piste : c'est arrivé au
-premier exercice, où huit lignes `ENOTFOUND todo-db` d'un incident antérieur
-précédaient le `SIGTERM recu` qui, lui, disait la vérité.
+**Les logs se lisent par un bout ou par l'autre selon le cas, et se tromper de
+bout coûte cinq minutes :**
+
+| Ce que montre `docker ps -a` | Lire les logs… | Pourquoi |
+| --- | --- | --- |
+| `Up`, ou `Exited (0)` | **par la fin** (`docker logs --tail 10`) | le conteneur a vécu ; la dernière ligne dit ce qui l'a arrêté (`SIGTERM recu`) |
+| `Exited (1)` ou `Restarting` | **par le début** (`docker logs todo-api \| head -20`) | il est mort au démarrage ; le message utile est en tête, enterré sous sa pile d'appels |
+
+Le second cas est mesuré : au test de la panne 6.4, le message
+`Variable d'environnement obligatoire manquante : DB_HOST` était à la **ligne 5
+sur 17**. Un `--tail 10` n'affichait que des lignes `at Module._load (...)`, qui
+ne disent rien à personne.
+
+Et dans les deux cas, méfiez-vous des lignes anciennes : elles peuvent venir
+d'un incident précédent. C'est arrivé au premier exercice, où huit lignes
+`ENOTFOUND todo-db` d'une panne antérieure précédaient le `SIGTERM recu` qui,
+lui, disait la vérité.
 
 ### 6.1 — Le conteneur de l'API est arrêté
 
@@ -311,15 +336,32 @@ JSON. Le panneau *Tâches en base* remonte à sa valeur d'avant, et le panneau
 
 ### 6.3 — L'API est coupée du réseau interne
 
-**Signature :** `up` à 0, mais `docker ps` montre `todo-api` bien `Up`. Le port
-13000 ne répond plus non plus (la publication du port suit le réseau).
+**Signature :** `up` à 0, le port 13000 ne répond plus (la publication du port
+suit le réseau) — et pourtant `docker ps` montre `todo-api` en **`Up (healthy)`**.
+
+**C'est la panne la plus déroutante des cinq, pour deux raisons :**
+
+- **Le conteneur se déclare en bonne santé.** Son `HEALTHCHECK` interroge
+  `127.0.0.1:3000` *depuis l'intérieur* du conteneur, et ça marche toujours.
+  Docker dit donc `healthy` pendant que plus personne au monde ne peut joindre
+  l'application. Un `docker ps` lu trop vite fait chercher ailleurs.
+- **Les logs sont vides de toute erreur.** Vérifié : les trois dernières lignes
+  sont `todo-api en ecoute sur http://0.0.0.0:3000`, `base visee : todo-db:5432`
+  et `[db] schema pret`. Du point de vue de l'application, rien ne s'est passé —
+  personne ne l'appelle, c'est tout.
+
+Ce qui doit faire penser à cette panne, c'est la combinaison : `up = 0` **et**
+un conteneur `Up`. Aucune des deux informations ne suffit seule.
 
 ```bash
 cible 'docker network connect todo-prod todo-api'
 ```
 
-Si la commande répond `already exists`, ce n'est pas cette panne. En cas de
-doute, la remise à plat qui répare toutes les variantes :
+**Vérifié le 5 août 2026 :** cette seule commande suffit, la publication du port
+revient avec le réseau. Pas besoin de recréer le conteneur.
+
+Si elle répond `already exists`, ce n'est pas cette panne. En cas de doute, la
+remise à plat qui répare toutes les variantes (également vérifiée) :
 
 ```bash
 cible 'cd /srv/todo && docker compose up -d --force-recreate todo-api'
@@ -331,9 +373,19 @@ affiche `todo-prod`.
 
 ### 6.4 — L'API a été relancée à la main, sans sa configuration
 
-**Signature :** `up` à 0, `todo-api` en `Exited` ou en `Restarting` en boucle.
-Les logs contiennent
-`Variable d'environnement obligatoire manquante : DB_HOST`.
+**Signature :** `up` à 0, `todo-api` en **`Exited (1)`**. Le `(1)` est tout le
+diagnostic : le process a planté, personne ne l'a arrêté.
+
+**Lire le log par le DÉBUT**, la cause est en tête :
+
+```bash
+cible 'docker logs todo-api 2>&1 | head -20'
+```
+
+**Attendu :**
+`Error: Variable d'environnement obligatoire manquante : DB_HOST. Copiez .env.example vers .env et renseignez-la.`
+— relevé en ligne 5 sur 17 lors du test du 5 août 2026, donc invisible avec un
+`--tail 10`.
 
 C'est un conteneur lancé par un `docker run` hors compose : il n'a ni le `.env`,
 ni le réseau, ni le nom de la base. On ne le répare pas, on le remplace :
@@ -351,9 +403,27 @@ cible 'docker rm -f todo-api && cd /srv/todo && docker compose up -d todo-api'
 
 ### 6.5 — La machine est saturée
 
-**Signature :** le p95 explose (plusieurs secondes), le trafic s'effondre sans
-que personne n'ait arrêté d'appeler, `up` clignote entre 0 et 1. Tous les
-conteneurs sont `Up`.
+**Signature :** aucune alarme. `up` reste à **1**, le taux d'erreur reste à
+**0 %**, tous les conteneurs sont `Up`. Seul le **débit** trahit la panne.
+
+Mesuré le 5 août 2026, avec quatre parasites bridés à un quart de cœur chacun :
+
+| | Avant | Pendant | Écart |
+| --- | --- | --- | --- |
+| Requêtes/s | 21,6 | 14,6 | **−32 %** |
+| p95 | 40 ms | 48 ms | +20 % |
+| `up` | 1 | 1 | — |
+| Taux d'erreur | 0 % | 0 % | — |
+
+**C'est la panne la plus dangereuse du lot**, précisément parce qu'aucun voyant
+ne s'allume. Elle ne se voit qu'en comparant à l'état normal — d'où le tableau
+de relevés du `README.md`, qui donne les valeurs de référence. Sans elles, 14,6
+req/s est un chiffre qui ne veut rien dire.
+
+Avec des parasites non bridés (la version du TP), l'effet serait plus violent :
+le p95 partirait en secondes et `up` finirait par clignoter. Sur cette machine,
+les parasites sont bridés parce que le CPU qu'ils brûlent est celui d'un serveur
+qui héberge un vrai site à côté.
 
 ```bash
 cible 'docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}"'
@@ -428,4 +498,7 @@ d'un moment où quelqu'un s'est trouvé bloqué devant ce document.
 | 2026-08-05, **après le 1ᵉʳ incident réel** | Le tableau disait « `todo-api` absent » pour 6.1 et « `Exited`ou `Restarting` » pour 6.4 — or 6.1 laisse aussi un conteneur `Exited`. Les deux lignes étaient indiscernables au moment où il fallait choisir. | Le critère devient le **code de sortie** : `Exited (0)` = arrêt propre (6.1), `Exited (1)` = plantage au démarrage (6.4). Ajouté au tableau et au § 6.1. |
 | 2026-08-05, **après le 1ᵉʳ incident réel** | Rien ne disait de lire les logs par la fin. Huit lignes `ENOTFOUND todo-db` d'un incident précédent précédaient la ligne utile et pointaient vers la mauvaise section. | Ajout de l'avertissement sous le réflexe n° 1, et passage de `--tail=40` à `--tail 10`. |
 | 2026-08-05, **après le 1ᵉʳ incident réel** | Le panneau *Trafic* était lu comme « plus personne n'appelle », alors que c'est le générateur de charge qui était mort avec la panne (`set -e` + `curl` en échec). | `scripts/charge.sh` survit désormais à sa cible, et la procédure prévient de ne pas conclure depuis ce panneau seul. |
+| 2026-08-05, **après vérification des pannes 3, 4 et 5** | Les signatures 6.3, 6.4 et 6.5 étaient **raisonnées, pas observées** — le tirage au sort n'avait donné que les pannes 1 et 2. Les trois ont été déclenchées délibérément, et 6.5 était franchement fausse : annoncée avec un `up` qui clignote et des timeouts, elle ne produit en réalité aucune erreur et aucun changement de `up`. | Les cinq lignes du tableau sont désormais mesurées. 6.5 devient « aucune alarme, seulement −32 % de débit », avec ses valeurs avant/pendant. |
+| 2026-08-05, **après vérification de la panne 3** | Rien ne disait que le conteneur reste **`Up (healthy)`** : son `HEALTHCHECK` interroge `127.0.0.1` depuis l'intérieur et réussit toujours. Ni que les logs ne contiennent **aucune erreur**. Un `docker ps` lu vite fait chercher ailleurs. | Les deux ajoutés au § 6.3, avec la combinaison qui identifie la panne : `up = 0` **et** conteneur `Up`. |
+| 2026-08-05, **après vérification de la panne 4** | La règle « lire les logs par la fin » était fausse pour un conteneur qui plante au démarrage : le message utile était en **ligne 5 sur 17**, et `--tail 10` n'affichait que la pile d'appels. | Deux règles au lieu d'une, choisies par le statut : `Exited (0)` → par la fin, `Exited (1)` → par le début. |
 | 2026-08-05, **après le 2ᵉ incident réel** | La procédure envoyait vers le tableau de bord en premier. Or les panneaux 2 à 4 reposent sur `rate([1m])` : au 2ᵉ incident, cinq secondes après l'arrêt de la base, le panneau *Erreurs* affichait encore 0,000 %. `docker ps -a`, lui, montrait déjà `todo-db  Exited (0) 5 seconds ago`. | Ajout de l'encadré sur la latence du tableau de bord, et inversion explicite de l'ordre : les deux commandes d'abord, Grafana ensuite. |
