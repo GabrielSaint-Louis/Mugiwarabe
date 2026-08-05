@@ -194,7 +194,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.JETON_REGISTRY_RETIRE }}
 
       - name: Publication de l'image
         if: github.ref == 'refs/heads/main'
