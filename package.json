@@ -7,7 +7,9 @@
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "lint": "eslint . --max-warnings=0",
-    "test": "jest tests/unit"
+    "migrate": "node scripts/migrate.js",
+    "test": "jest tests/unit",
+    "test:integration": "jest tests/integration --runInBand"
   },
   "engines": {
     "node": ">=20"
