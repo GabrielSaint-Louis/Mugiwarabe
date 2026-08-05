@@ -1282,6 +1282,54 @@ prévoyait pas « runner qui se croit vivant ». Un redémarrage l'a débloqué.
 C'est aussi la démonstration que le `nohup` est une solution provisoire :
 `svc.sh install` reste la vraie réponse.
 
+### Le fichier qui mentait pendant les pannes
+
+Dernière trouvaille de la journée, et elle vient de l'usage, pas d'une relecture.
+
+Toute la procédure de déploiement repose sur une commande pour répondre à la
+seule question qui compte en début d'astreinte — *quelle version tourne, là ?* :
+
+```bash
+cible 'grep ^TAG= /srv/todo/.env'
+```
+
+`apply.sh` écrivait ce sha dans le `.env` **avant** de télécharger l'image, avec
+une bonne intention en commentaire : « garder la trace de ce qu'on a *tenté* de
+déployer ». Un retour arrière vers un sha sans image publiée a montré le prix de
+cette intention.
+
+| | `.env` annonce | Ce qui tourne vraiment |
+| --- | --- | --- |
+| Avant correction | `TAG=0000000…` | `todo-api:aa1e8a4…` |
+| Après correction | `TAG=aa1e8a4…` | `todo-api:aa1e8a4…` |
+
+Le fichier ne se contentait pas d'être faux : il était faux **exactement dans le
+cas où on le lit**. Un déploiement qui réussit n'a besoin de personne. Celui qui
+échoue envoie quelqu'un lire ce fichier — et ce quelqu'un aurait conclu que la
+mauvaise version était en production, puis serait « revenu en arrière » depuis
+un point de départ imaginaire.
+
+La correction tient en une inversion : télécharger d'abord, écrire ensuite. Le
+`TAG` passe en variable d'environnement le temps du `pull`, ce qui permet
+d'essayer la version sans rien engager. Si l'image n'existe pas, le script
+s'arrête sur un message qui dit aussi **où trouver la liste des versions
+déployables** — parce que la cause n° 1 de ce cas, ce n'est pas une faute de
+frappe, c'est de prendre le sha d'un commit de branche, qui est construit mais
+jamais publié.
+
+Les quatre chemins, rejoués sur `vm-prod` :
+
+| Commande | Attendu | Observé |
+| --- | --- | --- |
+| `apply.sh <sha bidon>` | échec propre, rien ne change | `exit 1`, `.env` intact, conteneur `Up (healthy)`, `/health` → 200 |
+| `apply.sh <sha réel>` | retour arrière | `todo-api:10ca19d…` en place, `/health` → 200 en 3 ms |
+| `apply.sh` sans argument | redéploiement de la version courante | conteneur `Running`, **pas recréé** — la commande est idempotente |
+| `apply.sh <sha de main>` | retour à jour | `todo-api:aa1e8a4…`, `/health` → 200 |
+
+Ce qui rend l'histoire embarrassante : le commentaire qui justifiait l'ordre
+d'origine était plus long que le code qu'il défendait. Bien écrire pourquoi on
+fait une chose ne la rend pas juste — seul le fait de s'en servir le dit.
+
 ---
 
 ## Ce qui reste ouvert
