@@ -66,7 +66,6 @@ function toTask(row) {
   return {
     id: row.id,
     description: row.description,
-    status: row.status,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
   };
