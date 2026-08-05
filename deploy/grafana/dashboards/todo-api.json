@@ -108,13 +108,13 @@
         {
           "refId": "A",
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "100 * sum(rate(http_requests_total{status=~\"5..\"}[1m])) / sum(rate(http_requests_total[1m]))",
+          "expr": "100 * (sum(rate(http_requests_total{status=~\"5..\"}[1m])) or vector(0)) / sum(rate(http_requests_total[1m]))",
           "legendFormat": "5xx"
         },
         {
           "refId": "B",
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "100 * sum(rate(http_requests_total{status=~\"4..\"}[1m])) / sum(rate(http_requests_total[1m]))",
+          "expr": "100 * (sum(rate(http_requests_total{status=~\"4..\"}[1m])) or vector(0)) / sum(rate(http_requests_total[1m]))",
           "legendFormat": "4xx (pour comparaison)"
         }
       ],
