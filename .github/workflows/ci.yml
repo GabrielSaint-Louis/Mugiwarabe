@@ -1,0 +1,136 @@
+name: CI
+
+# Le decalage que corrige cette phase : la pipeline du jour 2 vivait sur
+# ClickFast, le projet d'echauffement. La Todo API, elle, avait bien une image
+# publiee, mais poussee a la main un soir. Plus maintenant.
+#
+# Une pull request VERIFIE (lint, tests, l'image se construit). Un push sur
+# main verifie ET PUBLIE. C'est la meme pipeline : seule la derniere etape est
+# conditionnee a la branche.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Un push qui arrive pendant qu'une execution tourne annule la precedente :
+# inutile de construire une image pour un etat du code qui n'existe deja plus.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # GHCR exige un nom d'image entierement en minuscules, la ou le proprietaire
+  # GitHub s'ecrit GabrielSaint-Louis. On fige donc la valeur ici plutot que de
+  # la deriver de ${{ github.repository }}, qui casserait au premier push avec
+  # un "invalid reference format" incomprehensible.
+  IMAGE: ghcr.io/gabrielsaint-louis/todo-api
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Stage 1a et 1b - les deux jobs les moins chers, en parallele. Aucun `needs:`
+  # entre eux : attendre les tests pour apprendre qu'il manque un point-virgule
+  # est du temps perdu. C'est `build` qui attend les deux.
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+
+      # `npm run lint` porte deja --max-warnings=0 : la commande locale et celle
+      # de la CI sont la meme, un warning tolere en local rougit ici aussi.
+      - run: npm run lint
+
+  test:
+    name: Tests unitaires
+    runs-on: ubuntu-latest
+    steps:
+      # Le runner est une machine neuve : sans checkout, il n'a meme pas le code.
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '20'
+          # Sans ce cache, npm ci retelecharge tout a chaque execution.
+          cache: 'npm'
+
+      # `npm ci` et pas `npm install` : installation stricte depuis le lock file.
+      - run: npm ci
+
+      # Suite unitaire seulement : aucune base n'est joignable depuis ce job,
+      # et c'est exactement la limite que la phase 6 viendra combler.
+      - run: npm test
+
+  # ---------------------------------------------------------------------------
+  # Stage 2 - on ne construit une image que si le lint ET les tests sont verts.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Image Docker
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Le GITHUB_TOKEN du run suffit a pousser sur GHCR : aucun mot de passe
+      # de registry a stocker en secret, et le jeton meurt avec le job.
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      # Tag par sha de commit, jamais `latest` : on saura toujours quel code a
+      # produit quelle image, on pourra remonter du conteneur au commit exact,
+      # et surtout le retour arriere de la phase 5 devient une simple question
+      # de nom.
+      - name: Build de l'image
+        run: docker build -t "$IMAGE:${{ github.sha }}" .
+
+      # Un build qui passe ne prouve pas que l'image sert a quelque chose. On la
+      # demarre vraiment et on lui parle avant de la declarer bonne. /health
+      # repond sans base : c'est voulu depuis le jour 1, l'API doit pouvoir dire
+      # "je suis la" meme quand Postgres demarre encore.
+      - name: Smoke test de l'image
+        run: |
+          docker run -d --name smoke -p 3000:3000 \
+            -e DB_HOST=inexistant -e DB_NAME=todo -e DB_USER=todo -e DB_PASSWORD=todo \
+            "$IMAGE:${{ github.sha }}"
+          for i in $(seq 1 20); do
+            curl -sf http://127.0.0.1:3000/health >/dev/null && break
+            sleep 0.5
+          done
+          curl -sf http://127.0.0.1:3000/health | grep -q '"status":"ok"'
+          # Une route inconnue doit repondre du JSON, pas la page d'erreur HTML
+          # d'Express : c'est la garantie donnee aux clients de cette API.
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/pas-une-route)" = "404"
+          docker rm -f smoke
+
+      - name: Taille de l'image
+        # Bloc `|` et non scalaire simple : le `: ` du format ferait lire une cle
+        # a YAML, et le workflow entier serait refuse avant de demarrer.
+        run: |
+          docker images "$IMAGE:${{ github.sha }}" --format 'Taille de l image -> {{.Size}}'
+
+      # --- A partir d'ici, uniquement sur main -------------------------------
+      # Une branche de travail s'arrete au build : elle prouve que l'image se
+      # construit et tourne, sans rien publier. Le registry ne recoit que du
+      # code deja fusionne.
+      - name: Connexion au registry
+        if: github.ref == 'refs/heads/main'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publication de l'image
+        if: github.ref == 'refs/heads/main'
+        run: docker push "$IMAGE:${{ github.sha }}"
