@@ -267,8 +267,11 @@ jobs:
           # pendant une astreinte serait ecrase au deploiement suivant, ce qui
           # est exactement le comportement voulu.
           scp -P ${{ secrets.DEPLOY_PORT }} -r \
-            deploy/compose.yml deploy/prometheus.yml deploy/grafana \
+            deploy/compose.yml deploy/prometheus.yml deploy/apply.sh deploy/grafana \
             ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/srv/todo/
+          ssh -p ${{ secrets.DEPLOY_PORT }} \
+              ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \
+              'chmod +x /srv/todo/apply.sh'
 
       - name: Demarrer la nouvelle version
         run: |
@@ -279,14 +282,14 @@ jobs:
               ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \
               "docker login ghcr.io -u ${{ github.actor }} --password-stdin" <<< "${{ secrets.GITHUB_TOKEN }}"
 
-          # LA commande de deploiement, et elle tient en une ligne. `up -d`
-          # compare l'etat voulu a l'etat reel et ne touche que ce qui a change :
-          # rejouee dix fois, elle laisse un seul conteneur todo-api, toujours a
-          # jour, la ou une sequence naive de docker run planterait sur un nom
-          # deja pris.
+          # LA commande de deploiement. C'est exactement celle que la procedure
+          # fait taper a un humain pour un retour arriere, au sha pres : ce que
+          # la pipeline joue toute seule et ce qu'on tape a la main a 3h du
+          # matin doivent etre le meme geste, sinon l'un des deux n'est jamais
+          # teste et lache le jour ou il sert.
           ssh -p ${{ secrets.DEPLOY_PORT }} \
               ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \
-              "cd /srv/todo && TAG=${{ github.sha }} docker compose up -d --remove-orphans"
+              "/srv/todo/apply.sh ${{ github.sha }}"
 
       # Un deploiement qui ne verifie rien n'est pas un deploiement, c'est un
       # espoir. On interroge l'API DE L'EXTERIEUR de la machine cible, par le
