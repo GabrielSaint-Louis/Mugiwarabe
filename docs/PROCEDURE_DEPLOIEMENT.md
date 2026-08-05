@@ -227,30 +227,61 @@ par relever la signature avant de toucher à quoi que ce soit** : les trois
 premières lignes se ressemblent au premier coup d'œil et se réparent
 différemment.
 
-| Panne | `up` | Trafic | Erreurs | `docker ps` sur la cible | Réparation |
-| --- | --- | --- | --- | --- | --- |
-| 6.1 API arrêtée | **0** | plus rien | pas de données | `todo-api` **absent** | § 6.1 |
-| 6.2 Base arrêtée | **1** | normal | **~65 % de 503** | `todo-api` présent, `todo-db` **absent** | § 6.2 |
-| 6.3 API coupée du réseau | **0** | plus rien | pas de données | `todo-api` **présent et Up** | § 6.3 |
-| 6.4 API relancée sans configuration | **0** | plus rien | pas de données | `todo-api` en `Exited` ou `Restarting` | § 6.4 |
-| 6.5 Machine saturée | 0 ou 1, clignote | s'effondre | timeouts | tout est `Up`, mais lent | § 6.5 |
+| Panne | `up` | Erreurs | `docker ps -a` sur la cible | Réparation |
+| --- | --- | --- | --- | --- |
+| 6.1 API arrêtée | **0** | pas de données | `todo-api` **`Exited (0)`** | § 6.1 |
+| 6.2 Base arrêtée | **1** | **~65 % de 503** | `todo-api` `Up`, `todo-db` **absent** | § 6.2 |
+| 6.3 API coupée du réseau | **0** | pas de données | `todo-api` **`Up`** | § 6.3 |
+| 6.4 API relancée sans configuration | **0** | pas de données | `todo-api` **`Exited (1)`** ou `Restarting` | § 6.4 |
+| 6.5 Machine saturée | 0 ou 1, clignote | timeouts | tout est `Up`, mais lent | § 6.5 |
 
-> **La distinction qui fait gagner le plus de temps :** `up = 0` **et**
-> `todo-api` absent de `docker ps` → le conteneur est arrêté. `up = 0` **et**
-> `todo-api` bien `Up` → ce n'est pas le conteneur, c'est le chemin réseau ou
-> la configuration. Ne relancez pas au hasard : la commande de la ligne
-> au-dessus ne répare pas la ligne d'en dessous.
+> **Les deux distinctions qui font gagner le plus de temps.**
+>
+> **`up = 0`, trois causes possibles**, et la commande qui répare l'une ne
+> répare pas les autres. C'est `docker ps -a` qui les sépare, et il faut lire
+> le **code de sortie**, pas seulement le mot `Exited` :
+>
+> | Ce que montre `docker ps -a` | Ce qui s'est passé | Aller à |
+> | --- | --- | --- |
+> | `Exited (0)` | arrêt propre, quelqu'un a fait `docker stop` | § 6.1 |
+> | `Exited (1)` ou `Restarting` | le process a planté au démarrage, il lui manque quelque chose | § 6.4 |
+> | `Up` | le conteneur va bien, c'est le chemin réseau qui est coupé | § 6.3 |
+>
+> **Ne vous fiez pas au panneau Trafic pour dire « plus personne n'appelle ».**
+> Si le trafic vient d'un générateur, il a pu mourir avec la panne. De vrais
+> utilisateurs, eux, continuent d'appeler. Un trafic à zéro veut dire
+> « personne n'obtient de réponse », pas « personne ne demande ».
 
 Le premier réflexe, dans tous les cas :
 
 ```bash
 cible 'docker ps -a --format "table {{.Names}}\t{{.Status}}"'
-cible 'cd /srv/todo && docker compose logs --tail=40 todo-api'
+cible 'docker logs --tail 10 todo-api'
 ```
+
+> **Tapez ces deux commandes AVANT d'ouvrir Grafana.** Les panneaux 2, 3 et 4
+> reposent sur `rate(...[1m])` : ils ont besoin d'une minute de données avant
+> de refléter ce qui vient de se produire. Trente secondes après le début
+> d'une panne, le panneau *Erreurs* affiche encore 0 % en toute bonne foi.
+> `docker ps -a` répond, lui, dans la seconde. Seul le panneau
+> *Disponibilité* est immédiat, parce qu'il ne calcule aucun taux — il bascule
+> en 4 secondes, mesuré.
+>
+> Le tableau de bord sert à **savoir qu'il y a un problème** et à voir combien
+> de temps il a duré. Il ne sert pas à identifier lequel dans les premières
+> secondes.
+
+**Lisez les logs par la fin.** Les lignes plus anciennes peuvent venir d'un
+incident précédent et vous envoyer sur une fausse piste : c'est arrivé au
+premier exercice, où huit lignes `ENOTFOUND todo-db` d'un incident antérieur
+précédaient le `SIGTERM recu` qui, lui, disait la vérité.
 
 ### 6.1 — Le conteneur de l'API est arrêté
 
-**Signature :** `up` à 0 (en moins de 15 s), `todo-api` absent de `docker ps`.
+**Signature :** `up` à 0 (en moins de 15 s), `todo-api` en **`Exited (0)`**, et
+la dernière ligne de `docker logs todo-api` est `SIGTERM recu, arret en cours`.
+Le zéro et le SIGTERM disent la même chose : personne n'a planté, quelqu'un a
+arrêté le conteneur.
 
 ```bash
 cible 'cd /srv/todo && docker compose up -d todo-api'
@@ -394,3 +425,7 @@ d'un moment où quelqu'un s'est trouvé bloqué devant ce document.
 | --- | --- | --- |
 | 2026-08-05 | Le § 1 ne disait pas comment vérifier qu'on était bien sur la machine cible et pas sur le serveur hôte. Deux Docker différents, les mêmes commandes. | Ajout du `cible hostname` et de son résultat attendu. |
 | 2026-08-05 | Les pannes 6.1, 6.3 et 6.4 donnaient toutes `up = 0` et se réparaient différemment. | Ajout de la colonne `docker ps` au tableau, et de l'encadré qui les sépare. |
+| 2026-08-05, **après le 1ᵉʳ incident réel** | Le tableau disait « `todo-api` absent » pour 6.1 et « `Exited`ou `Restarting` » pour 6.4 — or 6.1 laisse aussi un conteneur `Exited`. Les deux lignes étaient indiscernables au moment où il fallait choisir. | Le critère devient le **code de sortie** : `Exited (0)` = arrêt propre (6.1), `Exited (1)` = plantage au démarrage (6.4). Ajouté au tableau et au § 6.1. |
+| 2026-08-05, **après le 1ᵉʳ incident réel** | Rien ne disait de lire les logs par la fin. Huit lignes `ENOTFOUND todo-db` d'un incident précédent précédaient la ligne utile et pointaient vers la mauvaise section. | Ajout de l'avertissement sous le réflexe n° 1, et passage de `--tail=40` à `--tail 10`. |
+| 2026-08-05, **après le 1ᵉʳ incident réel** | Le panneau *Trafic* était lu comme « plus personne n'appelle », alors que c'est le générateur de charge qui était mort avec la panne (`set -e` + `curl` en échec). | `scripts/charge.sh` survit désormais à sa cible, et la procédure prévient de ne pas conclure depuis ce panneau seul. |
+| 2026-08-05, **après le 2ᵉ incident réel** | La procédure envoyait vers le tableau de bord en premier. Or les panneaux 2 à 4 reposent sur `rate([1m])` : au 2ᵉ incident, cinq secondes après l'arrêt de la base, le panneau *Erreurs* affichait encore 0,000 %. `docker ps -a`, lui, montrait déjà `todo-db  Exited (0) 5 seconds ago`. | Ajout de l'encadré sur la latence du tableau de bord, et inversion explicite de l'ordre : les deux commandes d'abord, Grafana ensuite. |
