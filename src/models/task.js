@@ -2,6 +2,7 @@
 
 const { randomUUID } = require('node:crypto');
 const { pool } = require('../db');
+const { tasksCreatedTotal } = require('../metrics');
 
 // Les trois etats admis. La meme liste est reprise cote stats-api (chapitre 8),
 // qui compte les taches par etat.
@@ -95,6 +96,13 @@ async function create(input) {
     'INSERT INTO tasks (id, description, status) VALUES ($1, $2, $3) RETURNING *',
     [randomUUID(), description, status]
   );
+
+  // Increment APRES l'insertion, jamais avant : un compteur de taches creees
+  // qui monte alors que la base a refuse la ligne raconte une histoire fausse,
+  // et c'est ce genre d'ecart qui fait perdre une demi-heure pendant une
+  // astreinte.
+  tasksCreatedTotal.inc();
+
   return toTask(rows[0]);
 }
 
