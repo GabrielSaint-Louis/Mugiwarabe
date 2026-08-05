@@ -1,0 +1,4 @@
+# Dossier vide volontairement. Sans lui, Grafana ecrit a chaque demarrage :
+#   level=error msg="Failed to read plugin provisioning files from directory"
+# Une ligne `error` sans consequence, et c'est exactement le genre de bruit qui
+# fait perdre du temps a quelqu'un qui lit les logs pendant une panne.
