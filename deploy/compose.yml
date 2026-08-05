@@ -100,9 +100,81 @@ services:
     networks:
       - todo-prod
 
+  # ---------------------------------------------------------------------------
+  #  La surveillance (phase 8)
+  #
+  #  Elle rejoint la stack de production, dans le meme fichier et sur le meme
+  #  reseau. C'est ce qui permet a Prometheus de joindre l'API par son nom de
+  #  service, sans qu'aucun port n'ait a etre expose pour ca : /metrics n'est
+  #  accessible que depuis l'interieur du reseau.
+  # ---------------------------------------------------------------------------
+  prometheus:
+    container_name: prometheus
+    image: prom/prometheus:v3.1.0
+    restart: unless-stopped
+
+    volumes:
+      # :ro — Prometheus n'a aucune raison d'ecrire dans sa configuration.
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      # Les mesures survivent a un redemarrage : sans ce volume, le tableau de
+      # bord repart d'une page blanche a chaque redeploiement, et on perd
+      # justement l'historique qui permet de dire "ca a commence quand ?".
+      - promdata:/prometheus
+
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      # 7 jours suffisent pour un TP et evitent de remplir le disque de la
+      # machine hote. En production, cette valeur se decide avec ceux qui
+      # devront enqueter sur un incident vieux d'un mois.
+      - '--storage.tsdb.retention.time=7d'
+
+    ports:
+      - '9090:9090'
+
+    networks:
+      - todo-prod
+
+  grafana:
+    container_name: grafana
+    image: grafana/grafana:11.5.1
+    restart: unless-stopped
+
+    environment:
+      # admin/admin est le defaut de l'image, et il est connu de la Terre
+      # entiere. Le mot de passe vient du .env pose a la main sur la machine.
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?absent du .env}
+      # Personne n'a besoin d'installer un plugin depuis ce Grafana, et le
+      # laisser joindre Internet depuis la machine de production n'apporte rien.
+      GF_ANALYTICS_REPORTING_ENABLED: 'false'
+      GF_ANALYTICS_CHECK_FOR_UPDATES: 'false'
+      GF_NEWS_NEWS_FEED_ENABLED: 'false'
+
+    volumes:
+      # Source de donnees et tableau de bord decrits en fichiers, donc versionnes
+      # dans le depot. Un tableau de bord construit a la souris disparait avec le
+      # volume et ne se relit dans aucune pull request.
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafanadata:/var/lib/grafana
+
+    ports:
+      # 3001 cote machine cible, 3000 dans le conteneur : le port par defaut de
+      # Grafana est le meme que celui de l'API, et les deux vivent ici.
+      - '3001:3000'
+
+    depends_on:
+      - prometheus
+
+    networks:
+      - todo-prod
+
 networks:
   todo-prod:
     name: todo-prod
 
 volumes:
   pgdata:
+  promdata:
+  grafanadata:
