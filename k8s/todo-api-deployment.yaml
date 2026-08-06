@@ -27,3 +27,12 @@ spec:
           image: ghcr.io/gabrielsaint-louis/todo-api:f692c37b8de454fa688576db5f0b21c69cf26f06
           ports:
             - containerPort: 3000
+          # Le .env copie a la main sur vm-prod au jour 3 disparait ici. Les
+          # deux objets sont deverses d'un coup dans l'environnement du
+          # conteneur : l'API lit deja DB_HOST, DB_USER, DB_PASSWORD sous ces
+          # noms exacts depuis le jour 1, rien a renommer.
+          envFrom:
+            - configMapRef:
+                name: todo-config
+            - secretRef:
+                name: todo-secret

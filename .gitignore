@@ -19,6 +19,23 @@ deploy_key
 # dedans, son jeton d'enregistrement ne doit pas partir avec.
 actions-runner/
 
+# --- Jour 4, phase 2 : le Secret du cluster ----------------------------------
+# Seul k8s/todo-secret.example.yaml est commite, avec des valeurs bidon. Le
+# fichier reel porte le mot de passe de la base en clair (stringData), il reste
+# sur la machine.
+k8s/todo-secret.yaml
+
+# --- Jour 4, phase 5 : le kubeconfig -----------------------------------------
+# Un kubeconfig committe donne les pleins pouvoirs sur le cluster a quiconque
+# le lit. Il vit dans ~/.kube/config, jamais ici.
+kubeconfig
+*.kubeconfig
+
+# --- Jour 4, phase 10 : la reponse de chaos.sh -------------------------------
+# .incident contient le numero de la panne tiree. Le committer reviendrait a
+# publier le corrige avec l'exercice.
+.incident
+
 coverage/
 *.log
 .DS_Store
