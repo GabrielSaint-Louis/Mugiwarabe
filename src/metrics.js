@@ -9,7 +9,7 @@
 //  repond. Ce fichier lui donne la parole, et Prometheus vient l'ecouter.
 // ---------------------------------------------------------------------------
 const client = require('prom-client');
-const { pool } = require('./db');
+const { pool, etatBase } = require('./db');
 
 // Un Registry rassemble toutes les metriques de l'application. On en cree un
 // explicitement plutot que d'utiliser le registre global : deux tests qui
@@ -61,6 +61,20 @@ const tasksCreatedTotal = new client.Counter({
   registers: [register],
 });
 
+// --- La metrique qui manquait au jour 3 ------------------------------------
+//
+// Jusqu'ici, rien ne distinguait « l'API va bien » de « l'API va bien ET la
+// base repond ». C'est la limite mesuree en phase 7 du jour 4 : base coupee,
+// les trois pods restent READY 1/1 et aucune alerte ne parle.
+//
+// Cette jauge dit la difference, sans rien coûter : elle relit l'etat mis en
+// cache par la surveillance de src/db.js, elle n'interroge jamais Postgres.
+const dbUp = new client.Gauge({
+  name: 'todo_db_up',
+  help: 'La base repond-elle a cette copie de l API (1) ou non (0)',
+  registers: [register],
+});
+
 const tasksInDatabase = new client.Gauge({
   name: 'todo_tasks_in_database',
   help: 'Nombre de taches actuellement en base, par etat',
@@ -72,6 +86,10 @@ const tasksInDatabase = new client.Gauge({
 // base toutes les secondes pour une valeur que personne ne lit serait du
 // gaspillage.
 async function rafraichirJauge() {
+  // Lecture du cache, pas une requete de plus : la surveillance de src/db.js
+  // interroge la base toutes les 10 s, quel que soit le nombre de scrapes.
+  dbUp.set(etatBase.joignable ? 1 : 0);
+
   try {
     const { rows } = await pool.query('SELECT status, count(*)::int AS n FROM tasks GROUP BY status');
 

@@ -295,10 +295,38 @@ curl -s -H "Host: todo.localhost" http://127.0.0.1:8080/api/tasks | head -c 120
 
 ## 5. Regarder l'état du cluster
 
-Il n'y a **pas** de tableau de bord Grafana sur le cluster : le Prometheus et le
-Grafana du jour 3 tournent dans `vm-prod`, qui est arrêtée. C'est un manque
-assumé, listé au § 7. En attendant, les quatre commandes qui répondent aux
-mêmes questions :
+Grafana : **`http://grafana.localhost:8080`** — identifiant `admin`, mot de
+passe dans le Secret :
+
+```bash
+kubectl -n todo get secret todo-secret -o jsonpath='{.data.GRAFANA_ADMIN_PASSWORD}' | base64 -d; echo
+```
+
+Tableau de bord *Todo API sur le cluster — les quatre golden signals*. Les deux
+premiers panneaux méritent d'être lus ensemble, et c'est nouveau :
+
+| Panneau | Ce qu'il dit | Le piège qu'il évite |
+| --- | --- | --- |
+| **1 · Copies en service** | combien des 3 répondent | `2/3` n'est pas une panne pour l'utilisateur ; c'en est une pour la marge — il ne reste qu'une copie avant la coupure |
+| **1 bis · La base répond-elle** | `todo_db_up`, une métrique que l'API ne peut produire qu'en ayant vraiment interrogé Postgres | le panneau 1 peut afficher **3** pendant que celui-ci affiche **INJOIGNABLE** : c'est exactement la limite de `/health`, rendue visible |
+| **7 · Quelle copie ne répond pas** | une ligne par pod | les autres panneaux disent *combien*, celui-ci dit *lequel* |
+
+**Quatre alertes**, provisionnées depuis `k8s/monitoring/alertes.yml` :
+
+| Alerte | Se déclenche quand | Après |
+| --- | --- | --- |
+| Plus aucune copie | `sum(up)` tombe à 0 | 1 min |
+| Plus de 5 % d'erreurs | même seuil que le critère de retour arrière du § 4 | 5 min |
+| **Une copie ne répond pas** | un pod est déclaré mais `up = 0` | 5 min |
+| **La base ne répond plus** | `todo_db_up` tombe à 0 | 2 min |
+
+> **La troisième est celle qui découvre les pannes du § 6.** Aucune des cinq ne
+> coupe le service : trois pods sains répondent `200` pendant qu'un quatrième
+> échoue en boucle. Vérifié le 6 août 2026 en rejouant la panne 6.3 — l'alerte
+> est passée `firing` pendant que `curl` répondait `200` tout du long. Sans
+> elle, personne ne se plaint et personne ne regarde.
+
+Sans Grafana, les mêmes questions en quatre commandes :
 
 | La question | La commande |
 | --- | --- |
@@ -322,11 +350,19 @@ question différente :
 > Mesuré le 6 août 2026 : base arrêtée, les trois pods restent `1/1`, aucun
 > événement `Unhealthy`, et pourtant `GET /api/tasks` répond `503`.
 >
-> **Le seul test qui ne ment pas est une vraie requête métier :**
+> **Depuis le 6 août 2026, la question a sa propre route.** `/health` n'a pas
+> bougé — les sondes restent branchées dessus, exprès, pour qu'une base lente
+> ne fasse pas retirer les trois copies du Service d'un coup. C'est `/ready`
+> qui dit la vérité sur la base :
 >
 > ```bash
-> curl -s -H "Host: todo.localhost" http://127.0.0.1:8080/api/tasks | head -c 120
+> curl -s -H "Host: todo.localhost" http://127.0.0.1:8080/ready
 > ```
+>
+> | Réponse | Ce que ça veut dire |
+> | --- | --- |
+> | `200 {"status":"ready","base":"joignable"}` | tout va bien |
+> | `503 {"status":"degraded","detail":"..."}` | le serveur écoute, la base ne répond pas. Le champ `detail` porte le message brut de `pg`, qui sépare « nom introuvable » de « connexion refusée » de « mot de passe invalide » — trois pannes, trois remèdes |
 
 ---
 
@@ -576,16 +612,14 @@ kubectl apply -f k8s/todo-api-service.yaml -f k8s/todo-ingress.yaml
 
 Cette procédure ne prévoit pas :
 
-- **la surveillance du cluster.** Le Prometheus et le Grafana du jour 3 tournent
-  dans `vm-prod`, qui est arrêtée, et ne scrutent rien du cluster. Les quatre
-  *golden signals* ne sont donc plus visibles en continu : il n'existe
-  aujourd'hui **aucune alerte** qui préviendrait d'un pod bloqué. C'est le
-  premier manque à combler, et il est d'autant plus important que les cinq
-  pannes du § 6 ne coupent pas le service — donc personne ne les signale.
-- **une corruption des données.** Aucune sauvegarde de la base n'existe : la PVC
-  `todo-db-data` est la seule copie, et elle vit sur le disque du nœud k3d.
-  Détruire le cluster détruit les données. Manque assumé pour un TP, et le
-  premier à combler pour un vrai service.
+- **la perte du nœud lui-même.** Les sauvegardes existent désormais (§ 9), mais
+  la PVC des dumps vit sur le **même disque** que celle des données. Une
+  sauvegarde qui ne quitte pas la machine qu'elle protège ne protège que des
+  bêtises humaines, pas des pannes matérielles. C'est le manque restant, et
+  c'est le premier à combler pour un vrai service.
+- **la restauration à une date précise** (*point-in-time recovery*). Le CronJob
+  tourne toutes les six heures : au pire, six heures de saisie sont perdues.
+  Réduire cette fenêtre demande l'archivage des WAL, un autre sujet.
 - **le port 8080 déjà occupé sur le serveur.** `k3d cluster create` échouerait.
   Trouver le coupable avec `ss -ltnp | grep 8080` ; sur cette machine c'est
   presque toujours la stack `docker compose` du jour 1
@@ -596,6 +630,42 @@ Cette procédure ne prévoit pas :
   `cd ~/actions-runner && nohup ./run.sh > runner.log 2>&1 &`.
 - **`kubectl` absent du PATH du runner.** Le job de déploiement le vérifie en
   première étape et le dit explicitement — mais il ne l'installe pas.
+
+---
+
+## 9. Sauvegarde et restauration
+
+Un `CronJob` dumpe la base toutes les six heures sur une PVC distincte, et garde
+les douze derniers fichiers (trois jours).
+
+```bash
+# Ce qui existe
+./scripts/restaurer.sh
+
+# Forcer un dump maintenant — le réflexe AVANT toute opération risquée
+kubectl -n todo create job --from=cronjob/todo-db-sauvegarde avant-migration
+kubectl -n todo logs job/avant-migration
+```
+
+**Restaurer**, sachant que c'est irréversible :
+
+```bash
+./scripts/restaurer.sh todo-20260806T120805Z.sql.gz
+```
+
+Le script affiche ce qu'il va écraser et exige qu'on tape `RESTAURER` en toutes
+lettres. Il se termine par `RESTAURATION_OK` et liste les tâches présentes.
+
+> **La restauration a été jouée, pas seulement écrite.** Le 6 août 2026 : table
+> vidée par un `TRUNCATE` volontaire, dump rejoué, la tâche témoin est revenue
+> et celle créée après le dump a bien disparu.
+>
+> **Et la première tentative a échoué.** Le `pg_dump` d'origine ne contenait que
+> des `CREATE TABLE` : le rejouer sur une base dont la table existe encore —
+> c'est-à-dire le cas le plus fréquent, une table vidée par erreur — s'arrêtait
+> sur `ERROR: relation "tasks" already exists`. La sauvegarde existait, elle
+> était valide, et elle ne se restaurait pas. Corrigé par `--clean --if-exists`.
+> **Une sauvegarde jamais restaurée n'est pas une sauvegarde.**
 
 ---
 
@@ -621,3 +691,6 @@ d'un moment où quelqu'un s'est trouvé bloqué devant ce document.
 | **2026-08-06, en chronométrant le retour arrière** | La vérification tenait en un `curl`. Or `rollout status` rend la main 3,7 s avant que tous les pods aient basculé : ce `curl` unique pouvait tomber sur un ancien pod et faire croire à un échec. | Encadré au § 4 avec les deux durées mesurées, et la consigne de répéter la requête. |
 | **2026-08-06, en relisant le § 6.6 à voix haute** | La reconstruction du cluster appliquait les manifestes dans l'ordre du dossier, Secret compris — or `todo-db.yaml` lit ses identifiants dedans. Un PostgreSQL démarré avant le Secret crée une base que l'API ne pourra jamais joindre. | L'ordre est explicite : le Secret d'abord, avec la raison. |
 | **2026-08-06, sur un incident tiré au sort, numéro inconnu à l'avance** | Le tableau annonçait `OOMKilled` dans la colonne `kubectl get pods` pour la panne 6.5. En vrai, elle s'affichait `CrashLoopBackOff` — **exactement comme la 6.4**. Suivi au mot près, le document envoyait au § 6.4, où le `kubectl logs` recommandé ne renvoie rien du tout (le noyau tue avant que quoi que ce soit soit écrit) : impasse complète, sur la seule panne du lot qui n'écrit aucun log. | La colonne `get pods` de 6.5 dit désormais « la même chose que 6.4 », l'encadré affirme en toutes lettres que `get pods` **ne suffit pas**, et le critère devient le `Exit Code` relevé par `describe`, avec la commande exacte. |
+| **2026-08-06, après avoir remonté la surveillance** | Le § 5 disait qu'il n'existait aucun tableau de bord ni aucune alerte sur le cluster, et le § 7 le listait comme le premier manque à combler. Les deux sont faux depuis que Prometheus et Grafana tournent dans le cluster. | § 5 réécrit avec les panneaux, les quatre alertes et leurs seuils. Et une alerte qui n'existait pas hier : « une copie ne répond pas », la seule chose qui découvre les pannes du § 6, puisqu'aucune ne coupe le service. |
+| **2026-08-06, après avoir ajouté `/ready`** | Le § 5 concluait « le seul test qui ne ment pas est une vraie requête métier ». C'était vrai, et insuffisant : un `GET /api/tasks` en erreur ne dit pas si le problème vient de la base ou du code. | `/ready` répond précisément à cette question, avec le message brut de `pg` dans son champ `detail`. `/health` n'a pas bougé, et le § 5 explique maintenant pourquoi c'est délibéré. |
+| **2026-08-06, en restaurant une sauvegarde pour la première fois** | Le CronJob écrivait des dumps valides depuis le début, et aucun ne se restaurait : sans `--clean --if-exists`, rejouer un dump sur une base dont la table existe encore s'arrête sur `relation "tasks" already exists`. C'est-à-dire précisément dans le cas où on restaure, une table vidée par erreur. | `--clean --if-exists` ajouté, dump refait, restauration jouée pour de vrai. Nouveau § 9, et la règle en tête : une sauvegarde jamais restaurée n'est pas une sauvegarde. |

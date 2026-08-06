@@ -46,3 +46,65 @@ describe('surface HTTP qui ne depend pas de la base', () => {
     expect(res.headers['x-dns-prefetch-control']).toBeDefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+//  /ready, la distinction ajoutee au jour 4
+//
+//  Ces deux cas tiennent dans la suite UNITAIRE, alors qu'ils parlent de la
+//  base, et c'est tout l'interet de la conception retenue : /ready lit un etat
+//  mis en cache, il n'interroge pas Postgres. On peut donc simuler une base
+//  morte sans base du tout, en ecrivant dans ce cache.
+// ---------------------------------------------------------------------------
+describe('/ready dit ce que /health ne dit pas', () => {
+  const { etatBase } = require('../../src/db');
+  const etatInitial = { ...etatBase };
+
+  afterEach(() => {
+    Object.assign(etatBase, etatInitial);
+  });
+
+  test('base joignable : 200 et status ready', async () => {
+    Object.assign(etatBase, {
+      joignable: true,
+      derniereErreur: null,
+      derniereVerification: new Date(),
+    });
+
+    const res = await request(app).get('/ready');
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('ready');
+    expect(res.body.base).toBe('joignable');
+  });
+
+  test('base injoignable : 503, avec le message brut de pg', async () => {
+    Object.assign(etatBase, {
+      joignable: false,
+      derniereErreur: 'getaddrinfo ENOTFOUND todo-db',
+      derniereVerification: new Date(),
+    });
+
+    const res = await request(app).get('/ready');
+
+    expect(res.status).toBe(503);
+    expect(res.body.status).toBe('degraded');
+    // Le detail est ce qui separe "nom introuvable" de "connexion refusee" de
+    // "mot de passe invalide" : trois pannes, trois remedes.
+    expect(res.body.detail).toBe('getaddrinfo ENOTFOUND todo-db');
+  });
+
+  test('et pendant ce temps /health continue de repondre ok', async () => {
+    Object.assign(etatBase, { joignable: false, derniereErreur: 'base morte' });
+
+    // C'EST LE TEST QUI DOCUMENTE LE CHOIX. /health ment, volontairement : les
+    // deux sondes du pod sont branchees dessus, et un /health qui suivrait la
+    // base ferait retirer les trois copies du Service au premier
+    // ralentissement de Postgres. Une base LENTE deviendrait une application
+    // TOTALEMENT indisponible.
+    const health = await request(app).get('/health');
+    const ready = await request(app).get('/ready');
+
+    expect(health.status).toBe(200);
+    expect(ready.status).toBe(503);
+  });
+});

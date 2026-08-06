@@ -31,6 +31,15 @@ spec:
         # Cette etiquette est le seul lien entre le Deployment et le Service :
         # aucun des deux ne connait le nom des pods, qui change a chaque rollout.
         app: todo-api
+      annotations:
+        # C'est le pod qui declare qu'il veut etre scrute, pas Prometheus qui
+        # tient une liste. Le prometheus.yml du jour 3 nommait sa cible en dur
+        # (`targets: ['todo-api:3000']`) : il aurait fallu l'editer a chaque
+        # nouvelle application. Ici, ces trois lignes suffisent, et un pod
+        # supprime disparait des cibles tout seul.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "3000"
+        prometheus.io/path: /metrics
     spec:
       # 30s, largement au-dessus des 5s du preStop plus le temps de fermeture
       # du serveur : le pod n'est jamais SIGKILL avant d'avoir fini de servir.
