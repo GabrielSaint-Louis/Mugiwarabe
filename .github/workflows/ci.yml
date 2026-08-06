@@ -200,148 +200,127 @@ jobs:
         if: github.ref == 'refs/heads/main'
         run: docker push "$IMAGE:${{ github.sha }}"
 
+
   # ---------------------------------------------------------------------------
-  # Stage 3 - le deploiement. C'est l'etape qui manquait hier soir : une image
-  # neuve dormait sur le registry pendant que le serveur continuait de faire
-  # tourner, sans le savoir, la version d'il y a deux semaines.
+  # Stage 3 - le deploiement. La cible a change de nature entre hier et
+  # aujourd'hui : ce n'est plus une machine qu'on joint en SSH pour y jouer
+  # trois commandes, c'est un cluster a qui on annonce un nouvel etat voulu.
   #
-  # Ce job est le seul a tourner en self-hosted, et pour une raison precise :
-  # la machine cible n'a pas d'adresse publique, aucun runner GitHub ne peut la
-  # joindre. Chaque job choisit son runner, et seul celui qui doit atteindre une
-  # machine privee tourne ici.
+  # Ce job reste self-hosted, mais plus du tout pour la meme raison qu'hier.
+  # Hier, le runner etait le seul a pouvoir joindre vm-prod, qui n'a pas
+  # d'adresse publique. Aujourd'hui, le runner et todo-cluster tournent sur la
+  # MEME machine : le runner lit deja ~/.kube/config, que k3d a rempli a la
+  # creation du cluster. Aucune cle, aucun secret GitHub supplementaire, aucune
+  # empreinte d'hote a accepter. Le deploiement est devenu plus simple qu'hier,
+  # pas plus complique.
+  #
+  # Et surtout, ce que ces quatre secrets DEPLOY_* garantissaient a grand-peine
+  # — que la cle privee ne touche jamais le disque du runner — n'a plus lieu
+  # d'etre : il n'y a plus de cle privee dans ce workflow.
   # ---------------------------------------------------------------------------
   deploy:
-    name: Deploiement
-    # Rien ne se deploie avant que l'image existe sur le registry.
+    name: Deploiement sur le cluster
+    # Rien ne se deploie avant que l'image existe sur le registry : un
+    # `kubectl set image` vers un tag absent laisse le rollout bloque, et le
+    # job passe alors dix minutes a echouer pour une raison evitable.
     needs: [build]
     runs-on: self-hosted
-    # Le garde-fou. Ce depot est public, et un runner self-hosted execute sur
-    # une vraie machine ce que la pipeline lui dit d'executer. Cette ligne
-    # separe "ma machine execute ce que j'ai fusionne moi-meme" de "ma machine
-    # execute ce que n'importe qui a propose".
+    # Le garde-fou, inchange depuis hier. Ce depot est public, et un runner
+    # self-hosted execute sur une vraie machine ce que la pipeline lui dit
+    # d'executer. Cette ligne separe "ma machine execute ce que j'ai fusionne
+    # moi-meme" de "ma machine execute ce que n'importe qui a propose".
     if: github.ref == 'refs/heads/main'
     permissions:
       contents: read
-      # Pour que la machine cible puisse tirer l'image depuis GHCR, on lui prete
-      # le jeton du run. Il expire avec le job : aucun mot de passe de registry
-      # ne reste sur la machine cible.
-      packages: read
+    env:
+      NS: todo
+      # Le contexte est nomme explicitement a chaque commande. Sans lui, un
+      # kubectl qui pointe ailleurs (un second cluster cree entre-temps,
+      # un `use-context` oublie la veille) deploierait sans broncher sur la
+      # mauvaise cible, et le job serait vert.
+      CTX: k3d-todo-cluster
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
 
-      # Un secret absent ou mal orthographie ne provoque PAS d'erreur : GitHub
-      # le remplace silencieusement par une chaine vide. Verifie le 5 aout 2026
-      # en ecrivant DEPLOY_PORTT au lieu de DEPLOY_PORT — le job echouait bien,
-      # mais sur `scp: bad port "-r"`, un message qui envoie chercher une faute
-      # de syntaxe dans la commande alors que le probleme est ailleurs.
+      # L'equivalent 2026 du "les secrets sont-ils tous la" d'hier : on verifie
+      # ce dont depend la suite AVANT de commencer, pour que l'echec nomme sa
+      # cause. Un kubectl absent du PATH du runner echouerait sinon sur un
+      # "command not found" au milieu d'un rollout a moitie lance.
+      - name: Le cluster est-il joignable
+        run: |
+          if ! command -v kubectl >/dev/null; then
+            echo "::error::kubectl est absent du PATH du runner self-hosted. L'installer sur la machine, il n'est pas fourni par le workflow."
+            exit 1
+          fi
+          if ! kubectl --context "$CTX" get ns "$NS" >/dev/null 2>&1; then
+            echo "::error::Le contexte $CTX ou le namespace $NS est injoignable. Le cluster todo-cluster tourne-t-il encore ? (k3d cluster list)"
+            exit 1
+          fi
+          echo "Contexte $CTX joignable, namespace $NS present."
+          kubectl --context "$CTX" get nodes
+
+      # Les manifestes sont du code : ils partent d'ici a chaque deploiement,
+      # exactement comme le compose.yml partait en scp hier. C'est ce qui evite
+      # le drift — l'ecart entre ce que dit le fichier versionne et ce que le
+      # cluster fait vraiment.
       #
-      # Ces quatre lignes transforment dix minutes de perplexite en une phrase.
-      - name: Les secrets sont-ils tous la
-        env:
-          H: ${{ secrets.DEPLOY_HOST }}
-          P: ${{ secrets.DEPLOY_PORT }}
-          U: ${{ secrets.DEPLOY_USER }}
-          K: ${{ secrets.DEPLOY_SSH_KEY }}
+      # Le Secret n'est pas dans la liste, et c'est volontaire : il n'existe pas
+      # dans le depot. Il a ete pose une fois a la main sur le cluster, comme le
+      # .env l'etait sur vm-prod.
+      - name: Envoyer l'etat voulu
         run: |
-          for nom in H P U K; do
-            if [ -z "${!nom}" ]; then
-              echo "::error::Le secret DEPLOY_* correspondant a '$nom' est vide ou absent. Verifier son orthographe dans Settings > Secrets and variables > Actions ET dans ce workflow."
-              exit 1
-            fi
-          done
-          echo "Les quatre secrets de deploiement sont presents."
+          kubectl --context "$CTX" apply \
+            -f k8s/todo-config.yaml \
+            -f k8s/todo-db.yaml \
+            -f k8s/todo-api-deployment.yaml \
+            -f k8s/todo-api-service.yaml \
+            -f k8s/todo-ingress.yaml
 
-      # La cle privee arrive en memoire, pas sur le disque. C'est le piege
-      # classique : une cle ecrite dans un fichier temporaire finit par trainer
-      # sur le disque du runner — et ce runner-ci n'est pas jetable, il tourne
-      # sur une machine qui sert a autre chose. L'agent SSH garde la cle le
-      # temps de la session et la prete a ssh et scp, sans qu'elle touche le
-      # systeme de fichiers.
-      - name: Charger la cle dans l'agent SSH
-        uses: webfactory/ssh-agent@v0.10.0
-        with:
-          ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
-
-      # Sans cette empreinte, ssh s'arreterait sur sa question interactive
-      # ("Are you sure you want to continue connecting?") et le job resterait
-      # bloque jusqu'au timeout, sans message clair.
-      - name: Faire connaissance avec la machine cible
+      # LA commande de deploiement. Elle vient APRES l'apply, jamais avant :
+      # l'apply remet le tag ecrit dans le fichier, cette ligne pose celui du
+      # commit qui vient d'etre pousse.
+      - name: Poser la nouvelle image
         run: |
-          mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          # On retire l'ancienne empreinte avant d'ecrire la nouvelle. Deux
-          # raisons : le fichier ne gonfle pas d'une ligne identique a chaque
-          # deploiement, et surtout une machine cible reconstruite (nouvelle
-          # cle d'hote) ne fait pas echouer tous les deploiements suivants sur
-          # un "REMOTE HOST IDENTIFICATION HAS CHANGED".
-          ssh-keygen -R "[${{ secrets.DEPLOY_HOST }}]:${{ secrets.DEPLOY_PORT }}" >/dev/null 2>&1 || true
-          ssh-keyscan -p ${{ secrets.DEPLOY_PORT }} -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
-          chmod 600 ~/.ssh/known_hosts
+          kubectl --context "$CTX" -n "$NS" set image \
+            deployment/todo-api todo-api="$IMAGE:${{ github.sha }}"
 
-      # Le compose.yml est du code : il vit dans le depot, il part sur la
-      # machine par la pipeline, et il ne se modifie jamais directement en
-      # production. Le .env, lui, ne bouge pas : il a ete pose une fois a la
-      # main et contient les mots de passe.
-      - name: Envoyer la description de la stack et de sa surveillance
-        run: |
-          # -r pour le dossier grafana/ : la source de donnees et le tableau de
-          # bord sont du code eux aussi. Ils partent d'ici et ne se modifient
-          # jamais directement en production — un panneau bricole a la souris
-          # pendant une astreinte serait ecrase au deploiement suivant, ce qui
-          # est exactement le comportement voulu.
-          scp -P ${{ secrets.DEPLOY_PORT }} -r \
-            deploy/compose.yml deploy/prometheus.yml deploy/apply.sh deploy/grafana \
-            ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/srv/todo/
-          ssh -p ${{ secrets.DEPLOY_PORT }} \
-              ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \
-              'chmod +x /srv/todo/apply.sh'
-
-      - name: Demarrer la nouvelle version
-        run: |
-          # Le jeton passe par l'entree standard, jamais en argument : un
-          # `docker login -p <jeton>` se retrouverait dans l'historique du shell
-          # et dans la liste des process de la machine cible.
-          ssh -p ${{ secrets.DEPLOY_PORT }} \
-              ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \
-              "docker login ghcr.io -u ${{ github.actor }} --password-stdin" <<< "${{ secrets.GITHUB_TOKEN }}"
-
-          # LA commande de deploiement. C'est exactement celle que la procedure
-          # fait taper a un humain pour un retour arriere, au sha pres : ce que
-          # la pipeline joue toute seule et ce qu'on tape a la main a 3h du
-          # matin doivent etre le meme geste, sinon l'un des deux n'est jamais
-          # teste et lache le jour ou il sert.
-          ssh -p ${{ secrets.DEPLOY_PORT }} \
-              ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \
-              "/srv/todo/apply.sh ${{ github.sha }}"
-
-      # Un deploiement qui ne verifie rien n'est pas un deploiement, c'est un
-      # espoir. On interroge l'API DE L'EXTERIEUR de la machine cible, par le
-      # port qu'elle publie : c'est le chemin qu'emprunte un vrai utilisateur.
+      # Le gate. Sans lui, le job serait vert des que l'ordre est accepte, ce
+      # qui ne dit rien de ce qui tourne : `set image` reussit meme quand
+      # l'image n'existe pas. Avec lui, le job attend que les pods soient
+      # vraiment prets, et rougit sinon.
       #
-      # 13000 et pas 3000 : la machine cible publie son port 3000 sur 13000 cote
-      # hote, parce que 3000 appartient deja a un autre site sur cette machine.
-      # Cette valeur n'est pas un secret, elle reste donc en clair ici — a la
-      # difference de l'adresse, du port SSH et de l'utilisateur.
-      - name: Verifier que l'API repond
+      # 180s : large devant les ~20s d'un rolling update sain, assez court pour
+      # qu'un tag inexistant ne bloque pas la file d'attente du runner.
+      - name: Attendre que le rollout converge
         run: |
-          for i in $(seq 1 30); do
-            if curl -sf http://127.0.0.1:13000/health | grep -q '"status":"ok"'; then
-              echo "L'API repond apres $i tentative(s)."
-              curl -s http://127.0.0.1:13000/health
+          if ! kubectl --context "$CTX" -n "$NS" rollout status deployment/todo-api --timeout=180s; then
+            echo "::error::Le rollout n'a pas converge en 180s. Le deploiement est en echec, l'ancienne version tourne toujours."
+            kubectl --context "$CTX" -n "$NS" get pods -l app=todo-api
+            kubectl --context "$CTX" -n "$NS" describe deployment todo-api | tail -30
+            echo "--- evenements recents ---"
+            kubectl --context "$CTX" -n "$NS" get events --sort-by=.lastTimestamp | tail -15
+            exit 1
+          fi
+
+      # Un rollout converge prouve que les pods sont prets au sens des sondes.
+      # Il ne prouve pas que le chemin complet fonctionne. On interroge donc
+      # l'API par l'Ingress, la ou passe un vrai utilisateur.
+      - name: Verifier que l'API repond par l'Ingress
+        run: |
+          for i in $(seq 1 15); do
+            if curl -sf -H "Host: todo.localhost" http://127.0.0.1:8080/health | grep -q '"status":"ok"'; then
+              echo "L'API repond par l'Ingress apres $i tentative(s)."
               exit 0
             fi
             sleep 2
           done
-
-          # Une minute sans reponse : le job echoue, et il laisse de quoi
-          # comprendre pourquoi. Un `exit 1` nu obligerait a se connecter a la
-          # machine pour apprendre ce que ces trois commandes disent deja.
-          echo "::error::L'API ne repond pas apres 60 secondes. Deploiement en echec."
-          ssh -p ${{ secrets.DEPLOY_PORT }} ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \
-            'cd /srv/todo && docker compose ps && echo "--- logs todo-api ---" && docker compose logs --tail=40 todo-api'
+          echo "::error::Les pods sont prets mais l'Ingress ne sert rien. Regarder l'Ingress et les endpoints du Service, pas les pods."
+          kubectl --context "$CTX" -n "$NS" get ingress,svc,endpoints
           exit 1
 
       - name: Ce qui tourne maintenant
         run: |
           echo "Version deployee : ${{ github.sha }}"
-          ssh -p ${{ secrets.DEPLOY_PORT }} ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \
-            "docker inspect -f 'image en cours -> {{.Config.Image}}' todo-api"
+          kubectl --context "$CTX" -n "$NS" get deployment todo-api \
+            -o jsonpath='image en cours -> {.spec.template.spec.containers[0].image}{"\n"}'
+          kubectl --context "$CTX" -n "$NS" get pods -l app=todo-api
