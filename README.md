@@ -1345,6 +1345,31 @@ fait une chose ne la rend pas juste — seul le fait de s'en servir le dit.
 
 ---
 
+## Jour 4, phase 5 — la pipeline atteint le cluster
+
+Les trois scénarios, joués pour de vrai le 6 août 2026 :
+
+| Scénario | Attendu | Obtenu |
+| --- | --- | --- |
+| Push sur une branche de travail | l'image est construite et testée, le cluster n'est pas touché | 4 jobs verts, `Deploiement sur le cluster` en **`skipping`** |
+| Merge sur `main` | un pod portant le nouveau sha apparaît, sans qu'aucune commande soit tapée | image passée de `f692c37…` à **`97bd668…`**, 3 pods `1/1` en 1 min 35 |
+| Une image qui n'existe pas | `rollout status` ne rend jamais la main, le job devient rouge | job **rouge** après 120 s, `Le retour arriere n'a pas converge`, pod bloqué en `ImagePullBackOff` |
+
+Le troisième mérite sa ligne : pendant les deux minutes où le job échouait,
+`curl` sur `/api/tasks` répondait **`200`**. Les trois pods sains n'avaient pas
+bougé — `maxUnavailable: 0` interdit qu'un pod parte avant qu'un nouveau soit
+prêt, et aucun ne l'était jamais devenu. **La pipeline a refusé un succès
+qu'elle n'avait pas, sans que personne en pâtisse.** Réparé par le § 6.3 de la
+procédure, un `rollout undo`.
+
+Ce qui a disparu du job, et qui compte autant que ce qui reste : les quatre
+secrets `DEPLOY_*`, l'agent SSH, le `ssh-keyscan`, la clé privée chargée en
+mémoire. Le runner et le cluster partagent la machine, `kubectl` lit le
+kubeconfig que `k3d cluster create` a déjà écrit. **Le déploiement est devenu
+plus simple qu'hier, pas plus compliqué.**
+
+---
+
 ## Jour 4, phase 8 — le rolling update, mesuré
 
 Le déploiement d'hier coupait le service « quelques secondes », écrit ainsi,
