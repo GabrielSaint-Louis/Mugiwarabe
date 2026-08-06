@@ -44,6 +44,21 @@ spec:
       # 30s, largement au-dessus des 5s du preStop plus le temps de fermeture
       # du serveur : le pod n'est jamais SIGKILL avant d'avoir fini de servir.
       terminationGracePeriodSeconds: 30
+      # Trois copies posees sur le meme noeud protegent d'un pod qui meurt, pas
+      # d'une machine qui s'arrete. Cette contrainte les repartit sur les noeuds
+      # disponibles : 2 et 1 sur un cluster a deux noeuds.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          labelSelector:
+            matchLabels:
+              app: todo-api
+          # ScheduleAnyway et pas DoNotSchedule, et c'est un choix, pas une
+          # facilite. En DoNotSchedule, un noeud indisponible — precisement le
+          # cas contre lequel cette contrainte existe — empecherait le pod de
+          # se placer ailleurs, et le rollout resterait bloque. La repartition
+          # est une preference forte, jamais une condition de demarrage.
+          whenUnsatisfiable: ScheduleAnyway
       containers:
         - name: todo-api
           # Le tag est un sha de commit, jamais `latest` : c'est la meme regle
