@@ -1683,6 +1683,22 @@ documente le choix en vérifiant que `/health` ment toujours.
 
 **48 tests** au total : 25 unitaires, 23 d'intégration.
 
+Éprouvé sur le cluster, base coupée par `kubectl scale --replicas=0`, une fois
+la version déployée par la pipeline :
+
+| | Ce que ça a répondu |
+| --- | --- |
+| `kubectl get pods` | 3 pods **`1/1`**, aucun événement `Unhealthy` |
+| `/health` | **`200 {"status":"ok"}`** — il ment toujours, exprès |
+| `/ready` | **`503`**, `detail: connect ECONNREFUSED 10.43.117.202:5432` |
+| `todo_db_up` | **`0`** |
+| Alerte « la base ne répond plus » | **`firing`** après 2 minutes |
+| Les trois autres alertes | `inactive` — elles n'ont rien à dire ici |
+
+La dernière ligne compte autant que les autres : chaque alerte parle de sa
+panne, et d'aucune autre. Une alerte qui se déclenche en même temps que trois
+voisines n'apprend rien à celui qu'elle réveille.
+
 ### 3. La sauvegarde — et la première restauration, qui a échoué
 
 Un `CronJob` toutes les six heures, `pg_dump` gzippé sur une PVC **distincte** de
