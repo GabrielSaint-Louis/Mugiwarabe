@@ -150,11 +150,24 @@ tp-devops-todo-api/
 │    ├── grafana/                 # source de données et tableau de bord, en fichiers
 │    ├── env.example              # modèle du .env posé à la main sur la cible
 │    └── deploy_key.pub           # la privée n'est PAS ici, et ne le sera jamais
-├── docs/PROCEDURE_DEPLOIEMENT.md # J3 : ce qu'on lit à 3 h du matin
+├── k8s/                          # J4 — l'état voulu du cluster
+│    ├── todo-api-deployment.yaml # 3 replicas, sondes, preStop, ressources
+│    ├── todo-api-service.yaml    # l'adresse stable devant des pods qui ne le sont pas
+│    ├── todo-config.yaml         # ce qui n'est pas sensible
+│    ├── todo-secret.example.yaml # le modèle ; todo-secret.yaml n'est JAMAIS commité
+│    ├── todo-db.yaml             # PVC + PostgreSQL + son Service
+│    ├── todo-ingress.yaml        # la porte d'entrée, sur todo.localhost
+│    └── chaos.sh                 # les 5 pannes de l'exercice de diagnostic
+├── docs/PROCEDURE_DEPLOIEMENT.md # ce qu'on lit à 3 h du matin — version cluster
 ├── scripts/
 │    ├── measure.sh               # les 4 métriques du chapitre 10
 │    ├── releve.sh                # J3 : une ligne du tableau de relevés
-│    └── charge.sh                # J3 : du trafic, pour que les panneaux bougent
+│    ├── charge.sh                # J3 : du trafic, pour que les panneaux bougent
+│    ├── charge-cluster.sh        # J4 : de la charge sur l'Ingress, et qui COMPTE
+│    ├── repartition.sh           # J4 : ce que chaque pod a vraiment reçu
+│    ├── mesure-rollout.sh        # J4 : un rolling update chronométré sous charge
+│    ├── mesure-rollback.sh       # J4 : le retour arrière, chronométré
+│    └── serrer-memoire.sh        # J4 : jusqu'où serrer limits.memory avant l'OOM
 ├── exercices/j2-echauffement/    # les 4 fichiers cassés du J2 et leurs corrigés
 ├── tests/
 │    ├── unit/                    # 22 cas, sans base
@@ -1332,6 +1345,243 @@ fait une chose ne la rend pas juste — seul le fait de s'en servir le dit.
 
 ---
 
+## Jour 4, phase 8 — le rolling update, mesuré
+
+Le déploiement d'hier coupait le service « quelques secondes », écrit ainsi,
+sans chiffre. Voici le chiffre, et celui d'aujourd'hui en face. Même charge dans
+les deux cas (`scripts/charge-cluster.sh`, une requête toutes les 100 ms sur
+`/api/tasks`), même bascule d'une version publiée vers une autre.
+
+| Déploiement | Requêtes échouées | Secondes d'indisponibilité | Temps de convergence totale |
+| --- | --- | --- | --- |
+| Hier, `apply.sh` + `docker compose up -d` sur `vm-prod` | **11 / 306** | **~1,1 s**, d'un seul tenant | 1,7 s |
+| Aujourd'hui, rolling update sur le cluster | **0 / 382** | **0 s** | 21,8 s |
+
+Les deux colonnes de droite disent des choses opposées, et c'est le cœur de la
+journée. Le déploiement d'hier est **12 fois plus rapide** — 1,7 s contre 21,8 s
+— parce qu'il ne fait rien d'autre qu'arrêter un conteneur et en démarrer un
+autre. C'est exactement pour ça qu'il coupe : les onze requêtes perdues sont
+**consécutives** (requêtes 27 à 37 du relevé), un trou franc dans le service.
+Celles du cluster, quand il y en a, sont isolées. Vingt secondes de plus, c'est
+le prix des trois pods remplacés un par un, chacun attendu jusqu'à ce qu'il soit
+`Ready`.
+
+### `maxUnavailable: 0` n'est pas ce qui a supprimé la coupure
+
+Première mesure sur le cluster, avec `maxUnavailable: 0` et `maxSurge: 1` posés
+comme le TP le suggère : **4 requêtes perdues sur 311**. Pas zéro. Le réglage
+censé garantir qu'aucun pod ne parte avant qu'un autre soit prêt n'avait rien
+changé du tout.
+
+La cause était ailleurs. Kubernetes envoie `SIGTERM` au pod **au moment même** où
+il retire son endpoint du Service. `src/server.js` ferme alors son serveur tout
+de suite — un comportement écrit au jour 2 et correct par ailleurs — pendant que
+Traefik, lui, n'a pas encore appris que ce pod ne doit plus recevoir de trafic.
+Les requêtes envoyées dans cet intervalle tombent sur un port fermé : `502`, ou
+`000` quand la connexion est coupée en cours de route.
+
+Le correctif tient en quatre lignes de manifeste, un `preStop` qui dort cinq
+secondes avant le `SIGTERM`, et **aucune ligne de code applicatif**. Les quatre
+combinaisons, mesurées séparément pour ne pas se raconter d'histoires :
+
+| `maxUnavailable` | `preStop` | Requêtes échouées |
+| --- | --- | --- |
+| 25 % (défaut) | absent | 3 / 305 |
+| **0** | absent | 4 / 302 |
+| 25 % (défaut) | `sleep 5` | **0 / 382** |
+| **0** | `sleep 5` | **0 / 382** |
+
+Lecture directe du tableau : le réglage qu'on retient de la journée n'est pas
+celui qui fait le travail. `maxUnavailable: 0` ne bouge pas le compteur ; le
+`preStop` l'annule, avec ou sans lui. Les deux sont gardés dans le manifeste
+versionné — le premier parce qu'il protège la capacité de service pendant le
+rollout, ce qui est une autre garantie, mais il fallait le mesurer pour ne pas
+lui attribuer un mérite qui n'est pas le sien.
+
+### Trois vérifications, dont une qui a d'abord menti
+
+- **Reproductibilité** : deux rollouts successifs dans la configuration finale,
+  0 échec sur 387 puis 0 sur 382.
+- **Contre-épreuve** : `preStop` retiré, le compteur remonte à 3 et 4 échecs
+  selon les passages. Le réglage sert bien à quelque chose.
+- **Le protocole lui-même a dû être corrigé.** La première version de
+  `scripts/mesure-rollout.sh` démarrait la charge pendant que les pods du
+  rollout *précédent* finissaient de mourir, et comptait leurs échecs au débit
+  du rollout mesuré — 3 requêtes perdues attribuées à la mauvaise cause. Le
+  script attend maintenant que le cluster soit au repos (autant de pods vivants
+  que voulus, tous prêts, aucun en trop) avant la première requête. Un
+  instrument de mesure se vérifie avant ce qu'il mesure.
+
+---
+
+## Jour 4, phase 9 — le retour arrière, chronomètre en main
+
+Même exercice qu'hier, même régression volontaire : le champ `status` retiré de
+`GET /api/tasks`. Hier l'image fautive était sur GHCR, taguée au sha de son
+commit ; aujourd'hui elle est construite localement et importée dans le cluster
+(`todo-api:regression-j4`), puis poussée par un `kubectl set image` direct.
+
+| | Jour 3, `apply.sh <sha>` | Jour 4, `kubectl rollout undo` |
+| --- | --- | --- |
+| Constat → service rétabli | **2 s** | **24,7 s** |
+| Ce qu'il fallait savoir pour agir | le sha exact de la version d'avant | rien du tout |
+| Ce qui a coupé pendant l'opération | tout | rien |
+
+**Le cluster est douze fois plus lent, et c'est le bon échange.** Les deux
+secondes d'hier étaient un `docker compose up -d` qui arrête et redémarre : une
+coupure franche, mais courte. Les 24,7 secondes d'aujourd'hui sont trois pods
+remplacés un par un pendant que le service continue de répondre. On a échangé de
+la vitesse contre l'absence de trou — exactement le même arbitrage qu'en
+phase 8, et il se lit dans les mêmes ordres de grandeur.
+
+L'autre écart n'est pas dans le tableau et compte davantage : hier, il fallait
+**connaître le sha de la version d'avant** pour taper la commande. Aujourd'hui,
+`rollout undo` sans argument suffit — le cluster garde lui-même l'historique de
+ce qu'il a fait tourner.
+
+### Ce que `rollout status` ne dit pas
+
+Première mesure : 21,0 s, `rollout status` rendu, tout semble fini. Sauf que la
+requête suivante répondait encore faux une fois sur deux. Les anciens pods sont
+encore dans les endpoints du Service pendant leur `preStop` de 5 secondes — ceux
+de la phase 8, qui empêchent de perdre des requêtes, retardent d'autant le
+moment où *plus personne* ne voit l'ancienne version.
+
+`scripts/mesure-rollback.sh` exige donc **30 bonnes réponses consécutives**, une
+seule mauvaise remettant le compteur à zéro. D'où l'écart entre les deux
+chiffres, et le second est le seul honnête :
+
+| Critère d'arrêt du chronomètre | Durée |
+| --- | --- |
+| `kubectl rollout status` rend la main | 21,0 s |
+| 30 réponses saines d'affilée | **24,7 s** |
+
+### Les deux autres vérifications
+
+- **`rollout history` liste plusieurs révisions**, et `--to-revision=N` cible
+  n'importe laquelle. Vérifié en revenant directement à la révision 21
+  (`f692c37…`) alors que la précédente était `aa1e8a4…`. À noter : les numéros
+  de révision ne sont pas contigus — 3, 4, 5, 6, 7, 9, 21, 22, 23, 27, 28 dans
+  l'historique du jour. Chercher « la révision d'avant » en soustrayant 1 mène
+  droit à un `error: unable to find specified revision`.
+- **Un `undo` sans rien à annuler échoue proprement** :
+  `error: no rollout history found for deployment "essai-undo"`, code de sortie
+  1, et le Deployment reste exactement dans l'état où il était.
+
+---
+
+## Jour 4, phase 10 — cinq pannes, et ce que le cluster ne répare pas
+
+Les cinq pannes de `k8s/chaos.sh`, jouées une par une sur `todo-cluster`, avec
+la signature relevée à chaque fois dans `kubectl get pods` puis dans
+`kubectl describe`. Le tableau complet est repris tel quel au § 7 de
+`docs/PROCEDURE_DEPLOIEMENT.md` — c'est là qu'il sert, pas ici.
+
+| Panne | `kubectl get pods` | `describe` / events | Se répare seule ? | Remède |
+| --- | --- | --- | --- | --- |
+| **1. Pod supprimé** | un nom de pod disparaît, un nouveau apparaît en `Running` dans la seconde | `SuccessfulCreate` sur le ReplicaSet, image `already present on machine` | **Oui**, ~14 s jusqu'à `1/1` | aucun |
+| **2. Processus tué (`kill 1`)** | même nom de pod, `RESTARTS` passe à 1 | `Last State: Terminated`, `Reason: Completed`, `Exit Code: 0` | **Oui**, ~13 s | aucun |
+| **3. Tag d'image inexistant** | 3 pods sains + 1 bloqué en `ErrImagePull` puis `ImagePullBackOff` | `Failed to pull image … not found`, `Back-off pulling image` | **Non** | `kubectl rollout undo deployment/todo-api -n todo` |
+| **4. Clé du Secret supprimée** | 3 pods sains + 1 en `CrashLoopBackOff`, `RESTARTS` qui grimpe | `Exit Code: 1`, et dans les logs : `Variable d'environnement obligatoire manquante : DB_PASSWORD` | **Non** | `kubectl apply -f k8s/todo-secret.yaml` puis `kubectl rollout restart deployment/todo-api -n todo` |
+| **5. Limite mémoire à 8Mi** | 3 pods sains + 1 en `OOMKilled` / `CrashLoopBackOff` | `Last State: Terminated`, `Reason: OOMKilled`, `Exit Code: 137`, **logs vides** | **Non** | `kubectl patch deployment todo-api -n todo --type=json -p='[{"op":"remove","path":"/spec/template/spec/containers/0/resources"}]'` |
+
+Deux se réparent seules, trois attendent une main humaine : exactement la
+frontière annoncée le matin. Ce qui la trace n'est pas la gravité de la panne,
+c'est sa **nature**. Les deux premières sont des écarts entre l'état voulu et
+l'état réel, et la boucle de réconciliation sait les refermer. Les trois autres
+sont des états voulus **impossibles** : le cluster fait exactement ce qu'on lui
+a demandé, il essaie, il échoue, et il continuera d'essayer aussi longtemps que
+le texte dira une chose irréalisable.
+
+### Trois choses apprises en les jouant, qu'aucune ne disait à l'avance
+
+**Aucune des cinq n'a coupé le service.** `curl` sur `/api/tasks` répondait `200`
+pendant les cinq, y compris les trois qui ne se réparent pas. `maxUnavailable: 0`
+protège les trois pods sains : le pod fautif reste en attente sans jamais
+remplacer personne. C'est confortable et c'est un piège — une panne 3 non
+détectée reste en place indéfiniment, personne ne se plaignant de rien. Un
+`kubectl get pods` régulier ou une alerte sur `kube_deployment_status_replicas_unavailable`
+est la seule chose qui la découvre.
+
+**La panne 5 est la seule qui ne dit rien dans les logs.** `kubectl logs` sur le
+pod `OOMKilled` renvoie du vide : le processus est tué par le noyau avant
+d'écrire quoi que ce soit. La cause n'existe **que** dans `describe`, ligne
+`Last State`. Chercher dans les logs sur cette panne-là, c'est chercher là où
+rien n'a jamais été écrit.
+
+**Le remède évident de la panne 5 ne marche pas.** `kubectl apply -f` sur le
+manifeste versionné — le réflexe légitime, celui qui répare la panne 4 — laisse
+la limite de 8Mi en place. Vérifié deux fois :
+
+| Tentative | `resources` après |
+| --- | --- |
+| `kubectl apply -f k8s/todo-api-deployment.yaml` | `{"limits":{"memory":"8Mi"}}` |
+| `kubectl apply --server-side --force-conflicts -f …` | `{"limits":{"memory":"8Mi"}}` |
+| `kubectl patch … --type=json -p '[{"op":"remove",…}]'` | `{}` ✅ |
+
+La raison : `apply` ne supprime que les champs qu'il a lui-même posés
+auparavant. Un champ ajouté par `kubectl patch` appartient à un autre
+propriétaire, et un manifeste qui n'en parle pas ne le retire pas — il ne le
+mentionne simplement pas. C'est le pendant exact du *drift* décrit le matin, vu
+depuis l'autre bout : non seulement une modification à la main ne se voit pas
+dans le fichier versionné, mais **réappliquer le fichier ne l'efface pas**. La
+seule discipline qui protège de ça reste celle du matin : ne jamais modifier un
+cluster autrement que par le fichier versionné.
+
+---
+
+## Jour 4, phase 12 — jusqu'où serrer les ressources
+
+Hier, « aucune limite de ressources » figurait dans *Ce qui reste ouvert*. Voici
+les valeurs, et surtout comment elles ont été trouvées : en cassant, pas en
+devinant. Chaque palier a été appliqué, puis chargé pendant 25 secondes, avec
+trois relevés `kubectl top` pendant la charge (`scripts/serrer-memoire.sh`).
+
+| `limits.memory` | `kubectl top` sous charge | Verdict |
+| --- | --- | --- |
+| 128Mi | 14–16 Mi | tenu, 0 requête perdue |
+| 64Mi | 14–15 Mi | tenu, 0 requête perdue |
+| 48Mi | 15–16 Mi | tenu, 0 requête perdue |
+| 32Mi | 14–15 Mi | tenu, 0 requête perdue |
+| 24Mi | 15–16 Mi | tenu, 0 requête perdue |
+| **20Mi** | — | **`OOMKilled`, `Exit Code: 137`**, `RESTARTS` qui grimpe |
+
+Le plancher est donc entre 20Mi et 24Mi. Et 24Mi n'est pas seulement « le pod
+démarre » : un rolling update complet sous charge à cette valeur n'a fait tomber
+**aucune requête** (0 sur 382), la même preuve qu'en phase 8, cette fois avec des
+ressources serrées.
+
+**La valeur retenue n'est pourtant pas 24Mi.**
+
+```yaml
+resources:
+  requests: { memory: 24Mi, cpu: 50m }
+  limits:   { memory: 48Mi, cpu: 500m }
+```
+
+24Mi tient sous la charge **qu'on sait produire ici**. Vérification faite avec
+quatre générateurs en parallèle plutôt qu'un : 258 requêtes chacun, 1 032 en
+tout, 0 échec, et la mémoire n'a bougé que de 15–16 Mi à 16–17 Mi. Ce qui
+n'est pas rassurant mais instructif : **la charge n'est pas ce qui fait monter la
+mémoire de cette application**. Un corps de réponse plus gros que nos tâches, ou
+un pic de GC, déplacerait le plafond sans qu'aucune des mesures ci-dessus l'ait
+vu venir. 48Mi, soit trois fois le pic mesuré et le double du plancher trouvé,
+achète cette marge-là — et le chiffre qui la justifie est écrit, plutôt que
+l'intuition qui l'aurait produite.
+
+`requests.memory` colle au plancher (24Mi) et non à la limite : le `requests`
+est ce que le scheduler **réserve**, et réserver 48Mi par pod ferait refuser des
+pods qu'une machine aurait très bien pu accueillir.
+
+Pour le CPU, l'asymétrie mérite d'être notée : dépasser `limits.memory` **tue**
+le conteneur (`OOMKilled`), dépasser `limits.cpu` le **ralentit** seulement
+(*throttling*). 500m laisse dix fois le CPU observé en pointe (41 à 48 m sous
+charge) : assez large pour ne jamais brider une rafale légitime, assez ferme
+pour qu'un pod parti en boucle n'affame pas ses voisins — ce que la panne n° 5
+du jour 3 avait montré, faute justement de limite.
+
+---
+
 ## Ce qui reste ouvert
 
 ### Refermé au jour 3
@@ -1346,18 +1596,36 @@ fait une chose ne la rend pas juste — seul le fait de s'en servir le dit.
   pipeline, jamais deux fois le même. C'est ce qui rend le retour arrière
   trivial (2 s mesurées).
 
+### Refermé au jour 4
+
+- ~~**Le déploiement coupe le service quelques secondes.**~~ **0 requête perdue
+  sur 382**, mesuré sous charge pendant un rolling update complet. Et le
+  correctif n'est pas celui qu'on croyait : `maxUnavailable: 0` n'y est pour
+  rien, c'est un `preStop` de 5 secondes qui a annulé la coupure.
+- ~~**Aucune limite de ressources.**~~ `requests` 24Mi / 50m, `limits`
+  48Mi / 500m, trouvées en serrant jusqu'à l'`OOMKilled` puis en revenant en
+  arrière — pas en devinant.
+- ~~**Rien ne relève l'application si elle plante à 3 h du matin.**~~ Mesuré :
+  un pod supprimé revient en 14 secondes, un processus tué dans son conteneur
+  en 13, sans qu'aucune commande soit tapée.
+- ~~**Une seule copie pour encaisser le trafic.**~~ Trois, et la preuve qu'elles
+  se le partagent vraiment : 55, 55 et 56 requêtes sur 166.
+
 ### Toujours ouvert
 
-- **Aucune sauvegarde de la base.** Le volume `pgdata` est la seule copie des
-  données. Un `docker volume rm` de trop, et rien ne les ramène. C'est le
-  premier manque à combler pour un vrai service, et il est écrit noir sur blanc
-  au § 7 de la procédure de déploiement.
-- **Aucune limite de ressources** (`deploy.resources.limits`) sur les services
-  de la stack. La panne n° 5 de l'exercice d'astreinte le montre bien : rien
-  n'empêche un conteneur voisin de prendre tout le CPU de la machine.
-- **Le déploiement coupe le service quelques secondes.** `docker compose up -d`
-  arrête l'ancien conteneur avant de démarrer le nouveau. Un déploiement bleu-
-  vert ou progressif est ce que le jour 4 doit apporter, avec Kubernetes.
+- **Aucune sauvegarde de la base.** La PVC `todo-db-data` est la seule copie des
+  données, et elle vit sur le disque du nœud k3d : détruire le cluster détruit
+  les données. C'est le premier manque à combler pour un vrai service, et il est
+  écrit noir sur blanc au § 7 de la procédure de déploiement.
+- **Plus aucune surveillance.** Le Prometheus et le Grafana du jour 3 tournent
+  dans `vm-prod`, qui est arrêtée, et ne scrutent rien du cluster. C'est une
+  **régression** par rapport à hier, et elle est d'autant plus grave que les
+  cinq pannes du jour 4 ne coupent pas le service : sans alerte, un pod bloqué
+  en `ImagePullBackOff` peut rester là des jours sans que personne s'en aperçoive.
+- **`/health` ne sait pas si la base répond.** Les deux sondes sont bâties
+  dessus et mentent donc de la même façon : base coupée, les trois pods restent
+  `READY 1/1`. Documenté plutôt que corrigé — un `/health` qui interrogerait
+  Postgres à chaque appel ferait tuer les trois pods au premier ralentissement.
 - **Le runner self-hosted tourne dans un `nohup`**, pas en service système. Un
   redémarrage du serveur, et les jobs restent `Queued` indéfiniment, sans
   message d'erreur — et ça n'est pas théorique, c'est arrivé une fois dans la
