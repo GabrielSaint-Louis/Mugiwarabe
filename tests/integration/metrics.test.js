@@ -152,3 +152,32 @@ describe('les metriques metier', () => {
     expect(valeur(await page(), 'todo_tasks_in_database{status="todo"}')).toBe(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+//  todo_db_up, la metrique ajoutee au jour 4
+//
+//  Elle vit dans la suite d'integration et pas dans l'unitaire, contrairement
+//  aux tests de /ready : ici on veut verifier que la surveillance interroge
+//  VRAIMENT la base, pas qu'elle relit correctement un cache.
+// ---------------------------------------------------------------------------
+describe('todo_db_up dit si la base repond a cette copie', () => {
+  const { verifierBase } = require('../../src/db');
+
+  test('base joignable : la metrique vaut 1', async () => {
+    // On force une verification plutot que d'attendre le tick de 10 s : un
+    // test qui dort dix secondes est un test qu'on finit par desactiver.
+    await verifierBase();
+
+    const res = await request(app).get('/metrics');
+
+    expect(res.status).toBe(200);
+    expect(res.text).toMatch(/^todo_db_up 1$/m);
+  });
+
+  test('elle est exposee avec son aide, lisible sans documentation', async () => {
+    const res = await request(app).get('/metrics');
+
+    expect(res.text).toContain('# HELP todo_db_up');
+    expect(res.text).toContain('# TYPE todo_db_up gauge');
+  });
+});
