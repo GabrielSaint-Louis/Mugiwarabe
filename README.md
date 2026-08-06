@@ -150,11 +150,24 @@ tp-devops-todo-api/
 │    ├── grafana/                 # source de données et tableau de bord, en fichiers
 │    ├── env.example              # modèle du .env posé à la main sur la cible
 │    └── deploy_key.pub           # la privée n'est PAS ici, et ne le sera jamais
-├── docs/PROCEDURE_DEPLOIEMENT.md # J3 : ce qu'on lit à 3 h du matin
+├── k8s/                          # J4 — l'état voulu du cluster
+│    ├── todo-api-deployment.yaml # 3 replicas, sondes, preStop, ressources
+│    ├── todo-api-service.yaml    # l'adresse stable devant des pods qui ne le sont pas
+│    ├── todo-config.yaml         # ce qui n'est pas sensible
+│    ├── todo-secret.example.yaml # le modèle ; todo-secret.yaml n'est JAMAIS commité
+│    ├── todo-db.yaml             # PVC + PostgreSQL + son Service
+│    ├── todo-ingress.yaml        # la porte d'entrée, sur todo.localhost
+│    └── chaos.sh                 # les 5 pannes de l'exercice de diagnostic
+├── docs/PROCEDURE_DEPLOIEMENT.md # ce qu'on lit à 3 h du matin — version cluster
 ├── scripts/
 │    ├── measure.sh               # les 4 métriques du chapitre 10
 │    ├── releve.sh                # J3 : une ligne du tableau de relevés
-│    └── charge.sh                # J3 : du trafic, pour que les panneaux bougent
+│    ├── charge.sh                # J3 : du trafic, pour que les panneaux bougent
+│    ├── charge-cluster.sh        # J4 : de la charge sur l'Ingress, et qui COMPTE
+│    ├── repartition.sh           # J4 : ce que chaque pod a vraiment reçu
+│    ├── mesure-rollout.sh        # J4 : un rolling update chronométré sous charge
+│    ├── mesure-rollback.sh       # J4 : le retour arrière, chronométré
+│    └── serrer-memoire.sh        # J4 : jusqu'où serrer limits.memory avant l'OOM
 ├── exercices/j2-echauffement/    # les 4 fichiers cassés du J2 et leurs corrigés
 ├── tests/
 │    ├── unit/                    # 22 cas, sans base
@@ -1583,18 +1596,36 @@ du jour 3 avait montré, faute justement de limite.
   pipeline, jamais deux fois le même. C'est ce qui rend le retour arrière
   trivial (2 s mesurées).
 
+### Refermé au jour 4
+
+- ~~**Le déploiement coupe le service quelques secondes.**~~ **0 requête perdue
+  sur 382**, mesuré sous charge pendant un rolling update complet. Et le
+  correctif n'est pas celui qu'on croyait : `maxUnavailable: 0` n'y est pour
+  rien, c'est un `preStop` de 5 secondes qui a annulé la coupure.
+- ~~**Aucune limite de ressources.**~~ `requests` 24Mi / 50m, `limits`
+  48Mi / 500m, trouvées en serrant jusqu'à l'`OOMKilled` puis en revenant en
+  arrière — pas en devinant.
+- ~~**Rien ne relève l'application si elle plante à 3 h du matin.**~~ Mesuré :
+  un pod supprimé revient en 14 secondes, un processus tué dans son conteneur
+  en 13, sans qu'aucune commande soit tapée.
+- ~~**Une seule copie pour encaisser le trafic.**~~ Trois, et la preuve qu'elles
+  se le partagent vraiment : 55, 55 et 56 requêtes sur 166.
+
 ### Toujours ouvert
 
-- **Aucune sauvegarde de la base.** Le volume `pgdata` est la seule copie des
-  données. Un `docker volume rm` de trop, et rien ne les ramène. C'est le
-  premier manque à combler pour un vrai service, et il est écrit noir sur blanc
-  au § 7 de la procédure de déploiement.
-- **Aucune limite de ressources** (`deploy.resources.limits`) sur les services
-  de la stack. La panne n° 5 de l'exercice d'astreinte le montre bien : rien
-  n'empêche un conteneur voisin de prendre tout le CPU de la machine.
-- **Le déploiement coupe le service quelques secondes.** `docker compose up -d`
-  arrête l'ancien conteneur avant de démarrer le nouveau. Un déploiement bleu-
-  vert ou progressif est ce que le jour 4 doit apporter, avec Kubernetes.
+- **Aucune sauvegarde de la base.** La PVC `todo-db-data` est la seule copie des
+  données, et elle vit sur le disque du nœud k3d : détruire le cluster détruit
+  les données. C'est le premier manque à combler pour un vrai service, et il est
+  écrit noir sur blanc au § 7 de la procédure de déploiement.
+- **Plus aucune surveillance.** Le Prometheus et le Grafana du jour 3 tournent
+  dans `vm-prod`, qui est arrêtée, et ne scrutent rien du cluster. C'est une
+  **régression** par rapport à hier, et elle est d'autant plus grave que les
+  cinq pannes du jour 4 ne coupent pas le service : sans alerte, un pod bloqué
+  en `ImagePullBackOff` peut rester là des jours sans que personne s'en aperçoive.
+- **`/health` ne sait pas si la base répond.** Les deux sondes sont bâties
+  dessus et mentent donc de la même façon : base coupée, les trois pods restent
+  `READY 1/1`. Documenté plutôt que corrigé — un `/health` qui interrogerait
+  Postgres à chaque appel ferait tuer les trois pods au premier ralentissement.
 - **Le runner self-hosted tourne dans un `nohup`**, pas en service système. Un
   redémarrage du serveur, et les jobs restent `Queued` indéfiniment, sans
   message d'erreur — et ça n'est pas théorique, c'est arrivé une fois dans la
