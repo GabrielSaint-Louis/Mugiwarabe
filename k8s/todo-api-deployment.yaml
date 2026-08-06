@@ -39,3 +39,36 @@ spec:
                 name: todo-config
             - secretRef:
                 name: todo-secret
+          # Deux sondes, deux decisions differentes, et c'est tout l'interet de
+          # les separer : l'une choisit qui recoit du trafic, l'autre choisit
+          # qui redemarre. Les confondre donne soit un pod qui recoit avant
+          # d'etre pret, soit un pod tue parce qu'il demarrait lentement.
+          #
+          # LIMITE CONNUE ET MESUREE (phase 7) : les deux interrogent /health,
+          # qui repond ok sans jamais toucher la base. Base coupee, ce pod
+          # reste READY 1/1 et continue de recevoir du trafic, pendant que
+          # /api/tasks renvoie 500. Assume : un /health qui interrogerait la
+          # base a chaque appel ferait echouer les trois sondes en meme temps
+          # au premier ralentissement de Postgres, et transformerait une base
+          # lente en trois pods tues.
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            # Court : l'API ecoute en moins d'une seconde, rien ne sert
+            # d'attendre pour la mettre en service.
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            # Plus large que la readiness, exprès : cette sonde-la TUE le
+            # conteneur. Un delai trop court sur un demarrage un peu lent
+            # produit un pod qui redemarre en boucle sans qu'il ait rien.
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
