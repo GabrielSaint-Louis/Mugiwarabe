@@ -33,9 +33,18 @@ while [ "$(date +%s)" -lt "$END" ]; do
   TOTAL=$((TOTAL + 1))
   if [ "$CODE" != "200" ]; then
     FAILED=$((FAILED + 1))
-    echo "requete $TOTAL : code $CODE"
+    # L'HORODATAGE N'EST PAS DECORATIF, il a corrige une conclusion fausse le
+    # 2026-08-06. Sans lui, on lit le NUMERO des requetes echouees et on en
+    # deduit une duree — or un echec consomme jusqu'a 3 secondes de timeout
+    # quand une reponse saine en prend cinq millisecondes. Dix-sept echecs
+    # etalés sur les requetes 45 a 69 avaient ete lus comme "2,4 secondes de
+    # panne" ; c'etait cinquante secondes.
+    echo "$(date -u +%H:%M:%S) requete $TOTAL : code $CODE"
   fi
   sleep 0.1
 done
 
 echo "Total : $TOTAL requetes, $FAILED echouees (code != 200)"
+# Le debit effectif trahit ce que le compteur d'echecs cache : une charge qui
+# rend beaucoup moins de requetes que prevu a passe son temps en timeouts.
+echo "Debit : $TOTAL requetes en ${DURATION}s, soit $((TOTAL / DURATION)) req/s (attendu ~9 sans incident)"
