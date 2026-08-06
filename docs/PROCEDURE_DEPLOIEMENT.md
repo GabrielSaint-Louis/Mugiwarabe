@@ -9,14 +9,41 @@ Toute commande de ce document se colle telle quelle dans un terminal. Si vous
 devez deviner un chemin, un nom ou un port, c'est un défaut de cette procédure :
 signalez-le, elle se corrige dans le même commit que le changement qui l'a créé.
 
+> **Version cluster, depuis le 6 août 2026.** La cible n'est plus la machine
+> `vm-prod` et son `docker compose`, c'est le cluster Kubernetes
+> `todo-cluster`. Ce qui change vraiment est résumé au § 0 ; le reste du
+> document a été réécrit en conséquence, pas dupliqué.
+
 | | |
 | --- | --- |
-| **Durée normale d'un déploiement complet** | 1 min 15 pipeline comprise (mesuré : 62 à 75 s sur 4 exécutions), dont 2 à 10 s d'indisponibilité |
-| **Durée normale d'un retour arrière** | moins de 30 s (mesuré : 2 s quand l'image est déjà sur la machine) |
+| **Durée normale d'un déploiement complet** | ~2 min pipeline comprise, dont **0 seconde d'indisponibilité** (mesuré : 0 requête perdue sur 382) |
+| **Durée normale d'un retour arrière** | **25 s** du constat au rétablissement (mesuré) |
 | **Au-delà de 5 min sans que l'API réponde** | on ne cherche plus, on revient en arrière (§ 4) |
 
-> Ces durées sont mesurées, pas estimées. Un déploiement qui dépasse 3 minutes
-> a un problème : regardez lequel des 5 jobs traîne dans l'onglet *Actions*.
+> Ces durées sont mesurées, pas estimées. Un `rollout` qui dépasse 3 minutes a
+> un problème : `kubectl -n todo describe deployment todo-api` le nomme, et le
+> § 6 le classe.
+
+---
+
+## 0. Ce qui a changé depuis la version « une machine »
+
+Six lignes à connaître avant tout le reste. Le geste de gauche ne fonctionne
+plus ; celui de droite le remplace.
+
+| Hier, sur `vm-prod` | Aujourd'hui, sur `todo-cluster` |
+| --- | --- |
+| `ssh` + clé privée `deploy/deploy_key` | `kubectl`, avec le kubeconfig déjà en place — **plus aucune clé** |
+| `cible 'grep ^TAG= /srv/todo/.env'` | `kubectl -n todo get deployment todo-api -o jsonpath='{.spec.template.spec.containers[0].image}'` |
+| `cible '/srv/todo/apply.sh <sha>'` | `kubectl -n todo set image deployment/todo-api todo-api=<image>:<sha>` |
+| retour arrière = rejouer un sha connu | `kubectl -n todo rollout undo deployment/todo-api` — **plus besoin de connaître le sha** |
+| `docker ps -a` pour voir l'état | `kubectl -n todo get pods` |
+| un déploiement coupe le service | **aucune coupure** : les pods sont remplacés un par un |
+
+Une conséquence à retenir avant de paniquer la première fois : **une panne sur
+le cluster ne coupe presque jamais le service.** Les trois pods sains
+continuent de répondre pendant qu'un quatrième échoue en boucle. C'est
+confortable, et c'est un piège — voir l'encadré du § 6.
 
 ---
 
@@ -26,38 +53,39 @@ Sans ces quatre éléments, n'ouvrez pas un terminal, vous perdrez du temps.
 
 | Élément | Valeur | Où le trouver |
 | --- | --- | --- |
-| Machine cible | conteneur `vm-prod` sur le serveur `ubuntu` | déjà démarré ; sinon § 6.6 |
-| Adresse et port SSH | `root@127.0.0.1`, port `2222` | publié sur la boucle locale du serveur uniquement |
-| Clé privée | `deploy/deploy_key` dans votre copie du dépôt | **jamais dans le dépôt** ; à regénérer via § 6.6 si perdue |
-| Dossier de travail sur la cible | `/srv/todo` | contient `compose.yml`, `prometheus.yml`, `apply.sh`, `.env`, `grafana/` |
+| Cluster | `todo-cluster`, un k3d sur le serveur `ubuntu` | `k3d cluster list` ; s'il manque, § 6.6 |
+| Contexte kubectl | `k3d-todo-cluster` | `kubectl config get-contexts` |
+| Namespace | `todo` | **toutes** les commandes portent `-n todo` |
+| Kubeconfig | `~/.kube/config` sur le serveur | écrit par `k3d cluster create` ; **jamais dans le dépôt** |
 
-Les ports publiés par la machine cible, **tous sur `127.0.0.1`** — rien n'est
-joignable depuis Internet, il faut être sur le serveur ou passer par un tunnel :
+Les URL, **toutes sur la boucle locale du serveur** — rien n'est joignable
+depuis Internet :
 
 | Service | URL depuis le serveur | Depuis votre poste |
 | --- | --- | --- |
-| API | `http://127.0.0.1:13000` | `ssh -L 13000:127.0.0.1:13000 <serveur>` |
-| Prometheus | `http://127.0.0.1:19090` | `ssh -L 19090:127.0.0.1:19090 <serveur>` |
-| Grafana | `http://127.0.0.1:13001` | `ssh -L 13001:127.0.0.1:13001 <serveur>` |
-| SSH de la cible | port `2222` | — |
+| API, par l'Ingress | `curl -H "Host: todo.localhost" http://127.0.0.1:8080/health` | `ssh -L 8080:127.0.0.1:8080 <serveur>` |
+| API, dans un navigateur | `http://todo.localhost:8080` | idem, `todo.localhost` se résout tout seul |
 
-> **Pourquoi 13000 et pas 3000 ?** Le port 3000 de ce serveur appartient déjà au
-> backend d'un autre site, et 3001 à son front. La machine cible les décale
-> côté hôte. À l'intérieur d'elle, tout est resté aux ports du cours : l'API
-> écoute sur 3000, Prometheus sur 9090, Grafana sur 3001.
+> **Pourquoi l'en-tête `Host` dans le `curl` ?** L'Ingress route sur le nom de
+> domaine. Sans cet en-tête, Traefik ne trouve aucune règle et répond **404** —
+> ce qui n'a rien à voir avec une panne de l'API. Un 404 sur `/health` est
+> presque toujours une erreur de `Host`, pas une application morte.
 
-Le raccourci qui évite de retaper les options SSH — toutes les commandes de ce
-document l'utilisent :
+Les deux commandes à taper en premier, toujours, avant même de savoir ce qui se
+passe :
 
 ```bash
-cd ~/tp-devops-todo-api
-alias cible='ssh -i deploy/deploy_key -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR root@127.0.0.1'
+kubectl config use-context k3d-todo-cluster
+kubectl -n todo get pods
 ```
 
-**Vérification :** `cible hostname` répond par une chaîne de 12 caractères
-hexadécimaux (l'identifiant du conteneur), pas par `ubuntu`. Si elle répond
-`ubuntu`, vous êtes sur le serveur hôte et pas sur la machine cible : toutes
-les commandes qui suivent toucheraient le mauvais Docker.
+**Vérification :** la première répond `Switched to context "k3d-todo-cluster"`,
+la seconde liste **quatre** lignes — trois `todo-api` et un `todo-db` — toutes
+en `Running` et `1/1`.
+
+> **Si `kubectl` répond `The connection to the server ... was refused`**, ce
+> n'est pas une panne de l'application : c'est le cluster qui n'est plus là.
+> Allez directement au § 6.6.
 
 ---
 
@@ -65,21 +93,23 @@ les commandes qui suivent toucheraient le mauvais Docker.
 
 Un `git push` sur `main` déclenche tout : lint, tests unitaires, tests
 d'intégration contre une vraie base, construction de l'image, publication sur
-GHCR taguée au sha du commit, puis déploiement sur la machine cible.
+GHCR taguée au sha du commit, puis application des manifestes et `set image`
+sur le cluster.
 
-**Aucune commande n'est à taper.** Si vous vous connectez en SSH pour déployer,
+**Aucune commande n'est à taper.** Si vous ouvrez un terminal pour déployer,
 c'est qu'il s'est passé quelque chose d'anormal — allez au § 3.
 
 **Vérification, dans cet ordre :**
 
 1. Onglet *Actions* du dépôt : les 5 jobs verts (`Lint`, `Tests unitaires`,
-   `Tests d'integration`, `Image Docker`, `Deploiement`).
-2. La dernière étape du job `Deploiement` affiche
-   `L'API repond apres N tentative(s)` suivi de `{"status":"ok",...}`.
+   `Tests d'integration`, `Image Docker`, `Deploiement sur le cluster`).
+2. La dernière étape du job de déploiement affiche
+   `deployment "todo-api" successfully rolled out` puis
+   `L'API repond par l'Ingress apres N tentative(s)`.
 3. Depuis le serveur :
 
    ```bash
-   curl -s http://127.0.0.1:13000/health
+   curl -s -H "Host: todo.localhost" http://127.0.0.1:8080/health
    ```
 
    **Attendu :** `{"status":"ok","timestamp":"..."}`
@@ -87,79 +117,88 @@ c'est qu'il s'est passé quelque chose d'anormal — allez au § 3.
 4. La version qui tourne est bien celle du commit :
 
    ```bash
-   cible 'grep ^TAG= /srv/todo/.env'
+   kubectl -n todo get deployment todo-api \
+     -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
    ```
 
-   **Attendu :** `TAG=<les 40 caractères du sha du dernier commit sur main>`
+   **Attendu :** l'image taguée avec les 40 caractères du sha du dernier commit
+   sur `main`.
 
 ### Quand un job est rouge
 
-> **Un job `Deploiement` rouge ne veut PAS dire « rien n'a été déployé ».**
-> Vérifié le 5 août 2026 : la nouvelle version était déjà en place et en train
-> de servir, seule l'étape de vérification avait échoué. La première chose à
-> faire devant un déploiement rouge est donc de regarder **ce qui tourne**, pas
-> de supposer que la production est restée à l'ancienne version :
->
-> ```bash
-> cible 'grep ^TAG= /srv/todo/.env'
-> ```
+> **Le job de déploiement gate sur `kubectl rollout status`.** C'est la
+> différence majeure avec hier : s'il est rouge, c'est que les nouveaux pods ne
+> sont **jamais** devenus prêts. Et dans ce cas, **l'ancienne version tourne
+> toujours et sert le trafic** — `maxUnavailable: 0` interdit qu'un pod sain
+> parte avant qu'un nouveau soit prêt.
 
-Le job rouge a déjà affiché `docker compose ps` et les dernières lignes de log
-de l'API : lisez-les avant toute chose, la réponse y est neuf fois sur dix.
-
-Selon le job qui rougit, ce qui est en jeu diffère — mesuré en cassant `main`
-exprès, une fois par cas :
+C'est l'inverse exact du piège d'hier, où un job rouge pouvait laisser la
+nouvelle version en place. Aujourd'hui :
 
 | Job rouge | Ce qui a été fait | État de la production |
 | --- | --- | --- |
 | `Lint`, `Tests unitaires`, `Tests d'integration` | rien | intacte |
-| `Image Docker` | rien n'est publié, `Deploiement` est `skipped` | intacte |
-| `Deploiement`, avant l'étape « Démarrer » | rien | intacte |
-| `Deploiement`, à l'étape « Vérifier » | **la nouvelle version tourne déjà** | **modifiée** |
+| `Image Docker` | rien n'est publié, le déploiement est `skipped` | intacte |
+| `Deploiement`, étape « Le cluster est-il joignable » | rien | intacte, mais **le cluster est en panne** → § 6.6 |
+| `Deploiement`, étape « Attendre que le rollout converge » | les manifestes sont appliqués, l'image est posée, **aucun nouveau pod n'est prêt** | **intacte**, l'ancienne version sert |
+| `Deploiement`, étape « Verifier … par l'Ingress » | les pods sont prêts | **modifiée** — l'API tourne mais l'Ingress ne la sert pas → § 6.7 |
 
-Le dernier cas est le seul qui demande une décision : soit le problème vient de
-la vérification elle-même, soit la nouvelle version est réellement en panne — et
-c'est alors le § 4 qui s'applique.
+Dans les deux derniers cas, le job a déjà affiché `get pods`, `describe` et les
+événements récents : lisez-les avant toute chose, la réponse y est neuf fois
+sur dix. **Un rollout bloqué n'est pas une urgence de service** — personne ne
+voit rien — mais il le devient si on l'oublie : la version fautive reste en
+attente indéfiniment.
 
 ---
 
 ## 3. Déploiement manuel d'une version précise
 
 À n'utiliser que si la pipeline ne peut pas faire son travail : runner arrêté,
-GitHub indisponible, ou urgence qui ne peut pas attendre 2 min 30.
+GitHub indisponible, ou urgence qui ne peut pas attendre.
 
-**Étape 3.1 — Choisir la version.** Les versions disponibles sont les sha des
-commits de `main` dont l'image a été publiée :
+**Étape 3.1 — Choisir la version.** Les versions déployables sont les sha des
+commits **fusionnés** sur `main` : seuls ceux-là ont une image publiée.
 
 ```bash
-git log --oneline -10 main
+git log --first-parent --format='%H  %s' -10 main
 ```
 
-**Vérification :** le sha choisi fait 40 caractères. Un sha court (7
-caractères) ne fonctionnera pas, les images sont taguées avec le sha complet.
+**Vérification :** le sha choisi fait 40 caractères. Un sha court ne
+fonctionnera pas, les images sont taguées avec le sha complet.
 
 **Étape 3.2 — Appliquer.**
 
 ```bash
-cible '/srv/todo/apply.sh <le-sha-complet>'
+kubectl -n todo set image deployment/todo-api \
+  todo-api=ghcr.io/gabrielsaint-louis/todo-api:<le-sha-complet>
+kubectl -n todo rollout status deployment/todo-api --timeout=180s
 ```
 
-**Vérification :** la commande se termine par un tableau listant `todo-api`,
-`todo-db`, `prometheus` et `grafana`, et la ligne `todo-api` porte le sha
-demandé dans sa colonne `IMAGE`. Si elle s'arrête sur `manifest unknown`, cette
-version n'a jamais été publiée : reprenez à l'étape 3.1. **Dans ce cas la
-production n'a pas bougé**, l'ancienne version tourne toujours.
+**Vérification :** la seconde commande se termine par
+`deployment "todo-api" successfully rolled out`.
+
+> **`set image` réussit toujours, même sur une image qui n'existe pas.** Il
+> n'écrit qu'une intention. C'est `rollout status` qui dit la vérité, et lui
+> seul : s'il n'a pas rendu la main au bout de 180 s, la nouvelle version n'est
+> jamais partie — allez au § 6.3. **Ne tapez jamais `set image` sans le
+> `rollout status` qui suit.**
 
 **Étape 3.3 — Confirmer que le service répond.**
 
 ```bash
-curl -s http://127.0.0.1:13000/health && echo && curl -s http://127.0.0.1:13000/api/tasks | head -c 120
+curl -s -H "Host: todo.localhost" http://127.0.0.1:8080/health && echo
+curl -s -H "Host: todo.localhost" http://127.0.0.1:8080/api/tasks | head -c 120
 ```
 
 **Vérification :** `{"status":"ok",...}` puis une liste JSON (éventuellement
-`[]`). Une réponse
-`{"error":"base de donnees injoignable, reessayez plus tard"}` signifie que
-l'API est là mais que la base ne répond pas : allez au § 6.2.
+`[]`). Une réponse `{"error":"base de donnees injoignable, reessayez plus tard"}`
+signifie que l'API est là mais que la base ne répond pas : § 6.2.
+
+**Étape 3.4 — Remettre le dépôt et le cluster d'accord.** Un `set image` tapé à
+la main crée un écart entre ce que dit le fichier versionné et ce que fait le
+cluster — le *drift*. Le prochain `git push` l'écrasera de toute façon ; si la
+version posée à la main doit rester, elle se commite dans
+`k8s/todo-api-deployment.yaml`.
 
 ---
 
@@ -173,13 +212,12 @@ donc elle tient en une commande.
 | Critère observable | Décision | Qui |
 | --- | --- | --- |
 | L'API ne répond plus depuis plus de **5 minutes** | retour arrière immédiat | la personne d'astreinte, seule, sans appeler personne |
-| Le panneau *Erreurs* dépasse **5 %** pendant plus de 5 minutes | retour arrière immédiat | idem |
-| Le p95 dépasse **1 seconde** pendant plus de 10 minutes | retour arrière | idem |
+| Plus de **5 %** des réponses en erreur pendant plus de 5 minutes | retour arrière immédiat | idem |
 | Un comportement faux mais sans erreur (champ manquant, mauvaise valeur) | retour arrière si un client est impacté | idem |
 | Doute | **retour arrière** | idem |
 
 On revient en arrière *d'abord*, on comprend *ensuite*. Un retour arrière coûte
-30 secondes et se rejoue ; une enquête menée pendant que le service est mort
+25 secondes et se rejoue ; une enquête menée pendant que le service est mort
 coûte des heures. Personne n'a jamais eu de reproche pour être revenu en
 arrière trop vite.
 
@@ -187,331 +225,350 @@ arrière trop vite.
 
 ```bash
 # 1. Quelle version tourne en ce moment
-cible 'grep ^TAG= /srv/todo/.env'
-#    Ce fichier ne peut pas mentir : apply.sh ne l'écrit qu'APRÈS avoir
-#    téléchargé l'image avec succès. Un déploiement qui échoue au pull le
-#    laisse intact. Voir l'encadré ci-dessous.
+kubectl -n todo get deployment todo-api \
+  -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
 
-# 2. La version d'avant, dans l'historique de main
-git log --format='%H  %s' -5 main
-
-# 3. On y revient
-cible '/srv/todo/apply.sh <sha-de-la-version-d-avant>'
+# 2. On revient à la précédente. Aucun sha à connaître : le cluster garde
+#    lui-même l'historique de ce qu'il a fait tourner.
+kubectl -n todo rollout undo deployment/todo-api
+kubectl -n todo rollout status deployment/todo-api --timeout=180s
 ```
 
-> **Un sha qui n'a pas d'image ne casse rien.** Tous les commits de `main` n'ont
-> pas d'image publiée : seuls les commits **fusionnés** en ont une. Si vous vous
-> trompez de sha à 3 h du matin, `apply.sh` échoue sur le téléchargement, dit
-> quelle commande liste les versions déployables, et **s'arrête là** : la
-> version en place continue de tourner et le `.env` n'a pas bougé. Vérifié le
-> 5 août 2026 avec un sha de quarante zéros — `exit 1`, conteneur intact,
-> `/health` toujours à 200.
+**C'est le gain le plus concret de la journée** : hier, il fallait retrouver le
+sha de la version d'avant pour taper la commande. Aujourd'hui, `rollout undo`
+sans argument suffit.
+
+### Revenir plus loin que la version précédente
+
+```bash
+kubectl -n todo rollout history deployment/todo-api
+kubectl -n todo rollout history deployment/todo-api --revision=<N>   # ce qu'elle contient
+kubectl -n todo rollout undo deployment/todo-api --to-revision=<N>
+```
+
+> **Les numéros de révision ne sont pas contigus.** Relevé le 6 août 2026 :
+> 3, 4, 5, 6, 7, 9, 21, 22, 23, 27, 28. Chercher « la révision d'avant » en
+> soustrayant 1 donne `error: unable to find specified revision` au pire
+> moment. **Listez toujours l'historique avant de choisir un numéro.**
+
+> **Un `undo` sans rien à annuler échoue proprement.** Vérifié le 6 août 2026 :
+> `error: no rollout history found for deployment "..."`, code de sortie 1, et
+> le Deployment reste exactement dans l'état où il était. Aucun risque à
+> essayer.
 
 ### La même chose sans terminal
 
-Si vous n'avez ni la clé privée, ni le dépôt, ni l'envie de taper du SSH à 3 h
-du matin : onglet **Actions** → workflow **Retour arriere** → *Run workflow*.
-Il demande le sha et une raison, refuse un sha court avec un message explicite,
-et fait exactement la même chose — c'est le même `apply.sh` au bout.
+Si vous n'avez ni accès au serveur, ni l'envie de taper du `kubectl` à 3 h du
+matin : onglet **Actions** → workflow **Retour arriere** → *Run workflow*. Il
+demande le sha et une raison, refuse un sha court avec un message explicite, et
+joue exactement les commandes ci-dessus sur le cluster.
 
-Deux avantages sur la voie manuelle : n'importe qui ayant accès au dépôt peut
-le déclencher, et le geste laisse une trace horodatée avec le nom de qui l'a
-lancé. Un `ssh` dans un terminal ne laisse rien.
+Deux avantages sur la voie manuelle : n'importe qui ayant accès au dépôt peut le
+déclencher, et le geste laisse une trace horodatée avec le nom de qui l'a lancé.
+Un `kubectl` dans un terminal ne laisse rien.
 
-**Vérification :** `curl -s http://127.0.0.1:13000/health` répond
-`{"status":"ok",...}`, et le comportement fautif a disparu. Notez l'heure : le
-temps écoulé entre le constat et cette réponse est la seule mesure qui compte.
+### Vérification, et le piège qui va avec
 
-> Aucune reconstruction, aucune pipeline, aucune conjecture. L'image de la
-> version précédente est déjà sur le registry, taguée au sha de son commit : il
-> suffit de la nommer. Mesuré le 5 août 2026 : **2 secondes** quand l'image est
-> déjà présente sur la machine, moins de 30 avec le téléchargement.
+```bash
+curl -s -H "Host: todo.localhost" http://127.0.0.1:8080/api/tasks | head -c 120
+```
+
+> **`rollout status` rend la main AVANT que l'ancienne version ait fini de
+> servir.** Mesuré le 6 août 2026 : 21,0 s pour que `rollout status` réponde,
+> **24,7 s** pour que *toutes* les réponses soient saines. Les anciens pods
+> restent dans les endpoints du Service pendant leur `preStop` de 5 secondes.
+>
+> Conséquence directe pour l'astreinte : **une seule requête de vérification ne
+> suffit pas.** Elle peut tomber sur un ancien pod et faire croire que le
+> retour arrière a échoué. Répétez-la une dizaine de fois, ou lancez
+> `./scripts/mesure-rollback.sh`, qui exige 30 bonnes réponses d'affilée.
 
 ### Après le retour arrière
 
 1. Le commit fautif reste sur `main` et **sera redéployé au prochain push**.
    Corrigez-le ou révoquez-le tout de suite (`git revert <sha>`), sinon la
    panne revient toute seule.
-2. Notez dans le Journal de bord du `README.md` : l'heure du constat, l'heure
-   du rétablissement, ce que le tableau de bord montrait.
+2. Notez dans le Journal de bord du `README.md` : l'heure du constat, l'heure du
+   rétablissement, ce que `kubectl get pods` montrait.
 
 ---
 
-## 5. Le tableau de bord, et comment le lire
+## 5. Regarder l'état du cluster
 
-Grafana : `http://127.0.0.1:13001` — identifiant `admin`, mot de passe dans
-`/srv/todo/.env` (`cible 'grep GRAFANA /srv/todo/.env'`). Tableau de bord
-*Todo API — les quatre golden signals*.
+Il n'y a **pas** de tableau de bord Grafana sur le cluster : le Prometheus et le
+Grafana du jour 3 tournent dans `vm-prod`, qui est arrêtée. C'est un manque
+assumé, listé au § 7. En attendant, les quatre commandes qui répondent aux
+mêmes questions :
 
-Sans Grafana, les quatre mêmes chiffres en une commande, depuis le dépôt :
+| La question | La commande |
+| --- | --- |
+| Est-ce que ça répond ? | `curl -s -H "Host: todo.localhost" http://127.0.0.1:8080/health` |
+| Combien de copies sont vraiment en service ? | `kubectl -n todo get pods` |
+| Qu'est-ce qui vient de se passer ? | `kubectl -n todo get events --sort-by=.lastTimestamp \| tail -20` |
+| Est-ce que ça consomme anormalement ? | `kubectl -n todo top pods` |
 
-```bash
-./scripts/releve.sh "constat"
-```
+Les colonnes de `get pods` se lisent dans cet ordre, et chacune répond à une
+question différente :
 
-Les six panneaux, dans l'ordre où on les regarde :
-
-| # | Panneau | La question à laquelle il répond |
+| Colonne | Ce qu'elle dit | Ce qu'elle **ne** dit **pas** |
 | --- | --- | --- |
-| 1 | Disponibilité | est-ce que ça répond, oui ou non |
-| 2 | Trafic | est-ce que quelqu'un appelle encore |
-| 3 | Erreurs | quelle **part** des appels rate |
-| 4 | Latence p95 | est-ce que c'est lent |
-| 5 | Tâches en base | est-ce que les données sont toujours là |
-| 6 | Codes de statut | **de quoi** il s'agit : 503 = la base, 500 = le code |
+| `READY` (`1/1`) | la readinessProbe passe, le Service lui envoie du trafic | que l'application rende le bon service — voir l'encadré ci-dessous |
+| `STATUS` | l'état du conteneur : `Running`, `ImagePullBackOff`, `CrashLoopBackOff`, `OOMKilled` | pourquoi — c'est `describe` qui le dit |
+| `RESTARTS` | combien de fois le conteneur est mort et a été relancé | ce qui l'a tué ; `describe` → `Last State` |
+| `AGE` | depuis quand ce pod existe | depuis quand il va mal |
 
-Un panneau vide alors que l'application tourne veut dire que la source de
-données ou le nom de la métrique est faux — jamais que « Grafana bugge ».
-Un panneau *Erreurs* vide veut dire qu'aucune requête n'arrive, ce qui est une
-information en soi.
+> **`READY 1/1` ne veut pas dire « l'application va bien ».** Les deux sondes
+> interrogent `/health`, qui répond `ok` **sans jamais toucher la base**.
+> Mesuré le 6 août 2026 : base arrêtée, les trois pods restent `1/1`, aucun
+> événement `Unhealthy`, et pourtant `GET /api/tasks` répond `503`.
+>
+> **Le seul test qui ne ment pas est une vraie requête métier :**
+>
+> ```bash
+> curl -s -H "Host: todo.localhost" http://127.0.0.1:8080/api/tasks | head -c 120
+> ```
 
 ---
 
 ## 6. Pannes connues et leur signature
 
 C'est ce qui transforme ce document en outil de diagnostic. **Commencez toujours
-par relever la signature avant de toucher à quoi que ce soit** : les trois
-premières lignes se ressemblent au premier coup d'œil et se réparent
-différemment.
+par relever la signature avant de toucher à quoi que ce soit.**
 
 **Les cinq signatures ci-dessous ont été observées, pas déduites** : chaque panne
-a été déclenchée pour de vrai le 5 août 2026, et les valeurs sont relevées.
+a été déclenchée pour de vrai le 6 août 2026 via `k8s/chaos.sh`, et les valeurs
+sont relevées.
 
-| Panne | `up` | Erreurs | `docker ps -a` sur la cible | Réparation |
+| Panne | `kubectl -n todo get pods` | `describe` / events | Se répare seule ? | Aller à |
 | --- | --- | --- | --- | --- |
-| 6.1 API arrêtée | **0** | pas de données | `todo-api` **`Exited (0)`** | § 6.1 |
-| 6.2 Base arrêtée | **1** | **65 % de 503** | `todo-api` `Up`, `todo-db` **absent** | § 6.2 |
-| 6.3 API coupée du réseau | **0** | pas de données | `todo-api` **`Up (healthy)`** | § 6.3 |
-| 6.4 API relancée sans configuration | **0** | pas de données | `todo-api` **`Exited (1)`** | § 6.4 |
-| 6.5 Machine saturée | **1** | **0 %** | tout est `Up`, plus des intrus | § 6.5 |
+| 6.1 Pod supprimé | un nom disparaît, un autre apparaît en `Running` | `SuccessfulCreate` sur le ReplicaSet | **Oui**, ~14 s | rien à faire |
+| 6.2 Processus tué dans le conteneur | même nom de pod, `RESTARTS` passe à 1 | `Last State: Terminated`, `Reason: Completed`, `Exit Code: 0` | **Oui**, ~13 s | rien à faire |
+| 6.3 Tag d'image inexistant | 3 pods sains **+ 1** en `ErrImagePull` puis `ImagePullBackOff` | `Failed to pull image … not found`, `Back-off pulling image` | **Non** | § 6.3 |
+| 6.4 Clé du Secret supprimée | 3 pods sains **+ 1** en `CrashLoopBackOff`, `RESTARTS` qui grimpe | `Exit Code: 1`, logs : `Variable d'environnement obligatoire manquante : DB_PASSWORD` | **Non** | § 6.4 |
+| 6.5 Limite mémoire trop basse | 3 pods sains **+ 1** en `CrashLoopBackOff` — **la même chose que 6.4** | `Reason: OOMKilled`, `Exit Code: 137`, **logs vides** | **Non** | § 6.5 |
 
-> **La ligne 6.5 surprend, et c'est le résultat le plus utile du tableau.** Une
-> machine saturée ne déclenche *aucune* alarme évidente : `up` reste à 1, le
-> taux d'erreur reste à 0 %. Ce qui bouge, c'est le **débit** — mesuré, il est
-> passé de 21,6 à 14,6 req/s, soit −32 %, avec un p95 de 40 ms à 48 ms. Une
-> panne qui ne fait clignoter aucun voyant rouge et que seule une comparaison
-> avec l'état normal révèle. C'est pour ça que le tableau de relevés du
-> `README.md` existe : sans valeur de référence, ces chiffres ne veulent rien
-> dire.
+> **AUCUNE DES CINQ N'A COUPÉ LE SERVICE.** `curl` répondait `200` pendant les
+> cinq, y compris les trois qui ne se réparent pas. C'est le résultat le plus
+> important du tableau, et le plus dangereux : **une panne qui ne fait pas
+> sonner le téléphone reste en place jusqu'à ce que quelqu'un regarde.** Le
+> compte de pods est le seul indicateur immédiat — 4 lignes au lieu de 3 pour
+> `todo-api`, dont une qui ne passe jamais `1/1`.
 
-> **Les deux distinctions qui font gagner le plus de temps.**
+> **Les trois pannes qui ne se réparent pas ont exactement la même forme :** un
+> pod de trop, coincé, pendant que les autres vont bien.
 >
-> **`up = 0`, trois causes possibles**, et la commande qui répare l'une ne
-> répare pas les autres. C'est `docker ps -a` qui les sépare, et il faut lire
-> le **code de sortie**, pas seulement le mot `Exited` :
+> **`kubectl get pods` ne suffit PAS à les séparer.** Vérifié le 6 août 2026 en
+> suivant cette procédure sur un incident tiré au sort : la panne 6.5 affichait
+> `CrashLoopBackOff`, exactement comme 6.4. Le `OOMKilled` de la colonne
+> `STATUS` n'apparaît que par intermittence, entre deux redémarrages — s'y fier
+> envoie une fois sur deux au mauvais paragraphe.
 >
-> | Ce que montre `docker ps -a` | Ce qui s'est passé | Aller à |
+> **C'est `describe`, et lui seul, qui tranche** :
+>
+> | `describe` → `Last State` | Ce qui s'est passé | Aller à |
 > | --- | --- | --- |
-> | `Exited (0)` | arrêt propre, quelqu'un a fait `docker stop` | § 6.1 |
-> | `Exited (1)` ou `Restarting` | le process a planté au démarrage, il lui manque quelque chose | § 6.4 |
-> | `Up` | le conteneur va bien, c'est le chemin réseau qui est coupé | § 6.3 |
+> | `STATUS: ImagePullBackOff` / `ErrImagePull` (visible dès `get pods`) | l'image demandée n'existe pas, ou le registry refuse | § 6.3 |
+> | `Reason: Error`, **`Exit Code: 1`** | l'application a décidé de mourir, et a écrit pourquoi dans ses logs | § 6.4 |
+> | `Reason: OOMKilled`, **`Exit Code: 137`** | le noyau l'a tuée, elle n'a rien écrit du tout | § 6.5 |
 >
-> **Ne vous fiez pas au panneau Trafic pour dire « plus personne n'appelle ».**
-> Si le trafic vient d'un générateur, il a pu mourir avec la panne. De vrais
-> utilisateurs, eux, continuent d'appeler. Un trafic à zéro veut dire
-> « personne n'obtient de réponse », pas « personne ne demande ».
+> **Le code de sortie est le seul critère fiable** : `1` = l'application a
+> décidé de mourir et a écrit pourquoi ; `137` = elle a été tuée et n'a rien
+> écrit. La commande qui donne la réponse en une ligne :
+>
+> ```bash
+> kubectl -n todo describe pod <le-pod> | grep -A3 "Last State"
+> ```
 
 Le premier réflexe, dans tous les cas :
 
 ```bash
-cible 'docker ps -a --format "table {{.Names}}\t{{.Status}}"'
-cible 'docker logs --tail 10 todo-api'
+kubectl -n todo get pods
+kubectl -n todo describe pod <le-pod-qui-ne-va-pas> | tail -25
 ```
 
-> **Tapez ces deux commandes AVANT d'ouvrir Grafana.** Les panneaux 2, 3 et 4
-> reposent sur `rate(...[1m])` : ils ont besoin d'une minute de données avant
-> de refléter ce qui vient de se produire. Trente secondes après le début
-> d'une panne, le panneau *Erreurs* affiche encore 0 % en toute bonne foi.
-> `docker ps -a` répond, lui, dans la seconde. Seul le panneau
-> *Disponibilité* est immédiat, parce qu'il ne calcule aucun taux — il bascule
-> en 4 secondes, mesuré.
->
-> Le tableau de bord sert à **savoir qu'il y a un problème** et à voir combien
-> de temps il a duré. Il ne sert pas à identifier lequel dans les premières
-> secondes.
+> **`describe` avant `logs`, toujours, et pas l'inverse.** La panne 6.5 ne
+> laisse **aucun log** : le processus est tué par le noyau avant d'écrire quoi
+> que ce soit. Sa cause n'existe **que** dans `describe`, ligne `Last State`.
+> Chercher dans les logs sur cette panne-là, c'est chercher là où rien n'a
+> jamais été écrit.
 
-**Les logs se lisent par un bout ou par l'autre selon le cas, et se tromper de
-bout coûte cinq minutes :**
-
-| Ce que montre `docker ps -a` | Lire les logs… | Pourquoi |
-| --- | --- | --- |
-| `Up`, ou `Exited (0)` | **par la fin** (`docker logs --tail 10`) | le conteneur a vécu ; la dernière ligne dit ce qui l'a arrêté (`SIGTERM recu`) |
-| `Exited (1)` ou `Restarting` | **par le début** (`docker logs todo-api \| head -20`) | il est mort au démarrage ; le message utile est en tête, enterré sous sa pile d'appels |
-
-Le second cas est mesuré : au test de la panne 6.4, le message
-`Variable d'environnement obligatoire manquante : DB_HOST` était à la **ligne 5
-sur 17**. Un `--tail 10` n'affichait que des lignes `at Module._load (...)`, qui
-ne disent rien à personne.
-
-Et dans les deux cas, méfiez-vous des lignes anciennes : elles peuvent venir
-d'un incident précédent. C'est arrivé au premier exercice, où huit lignes
-`ENOTFOUND todo-db` d'une panne antérieure précédaient le `SIGTERM recu` qui,
-lui, disait la vérité.
-
-### 6.1 — Le conteneur de l'API est arrêté
-
-**Signature :** `up` à 0 (en moins de 15 s), `todo-api` en **`Exited (0)`**, et
-la dernière ligne de `docker logs todo-api` est `SIGTERM recu, arret en cours`.
-Le zéro et le SIGTERM disent la même chose : personne n'a planté, quelqu'un a
-arrêté le conteneur.
+**Et les logs, quand il y en a, se lisent par le début :**
 
 ```bash
-cible 'cd /srv/todo && docker compose up -d todo-api'
+kubectl -n todo logs <pod> | head -20
 ```
 
-**Vérification :** `curl -s http://127.0.0.1:13000/health` répond en moins de
-10 s, et le panneau *Disponibilité* repasse à `EN LIGNE`.
+Un conteneur qui plante au démarrage écrit son message utile en tête, enterré
+sous sa pile d'appels. Mesuré au jour 3, toujours vrai : `--tail 10` n'affiche
+que des lignes `at Module._load (...)`, qui ne disent rien à personne.
 
-### 6.2 — La base est arrêtée
+### 6.1 — Un pod a disparu
 
-**Signature :** `up` reste à **1** — la cible répond toujours — mais le panneau
-*Erreurs* monte vers 65 % et le panneau 6 montre un flot de **503**. `/health`
-répond `ok`, `/api/tasks` répond
-`{"error":"base de donnees injoignable, reessayez plus tard"}`.
+**Signature :** un nom de pod change dans `get pods`, un nouveau apparaît, le
+compte revient à 3 en une quinzaine de secondes.
+
+**Rien à faire.** C'est la boucle de réconciliation qui travaille. Le service
+n'a pas été interrompu : les deux autres pods ont absorbé le trafic.
+
+**Vérification :** `kubectl -n todo get pods` montre 3 pods `1/1` et
+`RESTARTS` à 0 sur le nouveau.
+
+### 6.2 — Le processus est mort dans le conteneur
+
+**Signature :** le nom du pod **ne change pas**, mais sa colonne `RESTARTS`
+passe à 1 et son `AGE` reste ancien. `describe` montre
+`Last State: Terminated`, `Reason: Completed`, `Exit Code: 0`.
+
+**Rien à faire.** Le kubelet a relancé le conteneur dans le même pod.
+
+> **La distinction avec 6.1 tient au nom du pod**, et elle compte : un pod
+> supprimé est **remplacé** (nom neuf, `RESTARTS` à 0), un processus mort est
+> **relancé** (même nom, `RESTARTS` incrémenté). La seconde forme signale un
+> problème *dans* l'application ; la première, un événement extérieur. Un
+> `RESTARTS` qui grimpe tout seul au fil des heures est un symptôme à ne jamais
+> laisser passer, même si le pod finit toujours par revenir.
+
+### 6.3 — Le tag d'image n'existe pas
+
+**Signature :** un pod de trop, en `ErrImagePull` puis `ImagePullBackOff`. Les
+trois autres vont bien. `describe` :
+`Failed to pull image "...:<tag>": ... not found`.
+
+C'est le cas normal après un `set image` avec une faute de frappe, ou vers un
+commit dont l'image n'a jamais été publiée.
 
 ```bash
-cible 'cd /srv/todo && docker compose up -d todo-db'
+kubectl -n todo rollout undo deployment/todo-api
+kubectl -n todo rollout status deployment/todo-api --timeout=180s
 ```
 
-**Vérification :** `curl -s http://127.0.0.1:13000/api/tasks` répond une liste
-JSON. Le panneau *Tâches en base* remonte à sa valeur d'avant, et le panneau
-*Erreurs* redescend à 0 en moins d'une minute.
+**Vérification :** `kubectl -n todo get pods` revient à 3 pods `1/1`, et
+l'image du Deployment est de nouveau celle d'avant (§ 4, commande 1).
 
-> **Ne redémarrez pas l'API.** Elle va parfaitement bien : elle distingue déjà
-> « la base est absente » (503) de « j'ai un bug » (500). La redémarrer fait
-> perdre une minute et ne change rien.
+> Cette panne est celle que le job de déploiement attrape tout seul : il gate
+> sur `rollout status` et devient rouge. Si vous la trouvez à la main, c'est
+> qu'elle vient d'un `set image` tapé hors pipeline.
 
-### 6.3 — L'API est coupée du réseau interne
+### 6.4 — Une clé de configuration a disparu
 
-**Signature :** `up` à 0, le port 13000 ne répond plus (la publication du port
-suit le réseau) — et pourtant `docker ps` montre `todo-api` en **`Up (healthy)`**.
-
-**C'est la panne la plus déroutante des cinq, pour deux raisons :**
-
-- **Le conteneur se déclare en bonne santé.** Son `HEALTHCHECK` interroge
-  `127.0.0.1:3000` *depuis l'intérieur* du conteneur, et ça marche toujours.
-  Docker dit donc `healthy` pendant que plus personne au monde ne peut joindre
-  l'application. Un `docker ps` lu trop vite fait chercher ailleurs.
-- **Les logs sont vides de toute erreur.** Vérifié : les trois dernières lignes
-  sont `todo-api en ecoute sur http://0.0.0.0:3000`, `base visee : todo-db:5432`
-  et `[db] schema pret`. Du point de vue de l'application, rien ne s'est passé —
-  personne ne l'appelle, c'est tout.
-
-Ce qui doit faire penser à cette panne, c'est la combinaison : `up = 0` **et**
-un conteneur `Up`. Aucune des deux informations ne suffit seule.
+**Signature :** un pod de trop, en `CrashLoopBackOff`, `Exit Code: 1`,
+`RESTARTS` qui grimpe. **Les logs disent la cause en toutes lettres :**
 
 ```bash
-cible 'docker network connect todo-prod todo-api'
-```
-
-**Vérifié le 5 août 2026 :** cette seule commande suffit, la publication du port
-revient avec le réseau. Pas besoin de recréer le conteneur.
-
-Si elle répond `already exists`, ce n'est pas cette panne. En cas de doute, la
-remise à plat qui répare toutes les variantes (également vérifiée) :
-
-```bash
-cible 'cd /srv/todo && docker compose up -d --force-recreate todo-api'
-```
-
-**Vérification :** `curl -s http://127.0.0.1:13000/health` répond `ok`, et
-`cible 'docker inspect -f "{{range \$k,\$v := .NetworkSettings.Networks}}{{\$k}} {{end}}" todo-api'`
-affiche `todo-prod`.
-
-### 6.4 — L'API a été relancée à la main, sans sa configuration
-
-**Signature :** `up` à 0, `todo-api` en **`Exited (1)`**. Le `(1)` est tout le
-diagnostic : le process a planté, personne ne l'a arrêté.
-
-**Lire le log par le DÉBUT**, la cause est en tête :
-
-```bash
-cible 'docker logs todo-api 2>&1 | head -20'
+kubectl -n todo logs <le-pod> | head -20
 ```
 
 **Attendu :**
-`Error: Variable d'environnement obligatoire manquante : DB_HOST. Copiez .env.example vers .env et renseignez-la.`
-— relevé en ligne 5 sur 17 lors du test du 5 août 2026, donc invisible avec un
-`--tail 10`.
+`Error: Variable d'environnement obligatoire manquante : DB_PASSWORD.`
 
-C'est un conteneur lancé par un `docker run` hors compose : il n'a ni le `.env`,
-ni le réseau, ni le nom de la base. On ne le répare pas, on le remplace :
+L'application refuse de démarrer sans sa configuration, plutôt que de se
+connecter à une base au hasard. C'est voulu depuis le jour 1.
 
 ```bash
-cible 'docker rm -f todo-api && cd /srv/todo && docker compose up -d todo-api'
+kubectl apply -f k8s/todo-secret.yaml
+kubectl -n todo rollout restart deployment/todo-api
+kubectl -n todo rollout status deployment/todo-api --timeout=180s
 ```
 
-**Vérification :** `curl -s http://127.0.0.1:13000/health` répond `ok`, et
-`cible 'cd /srv/todo && docker compose ps'` liste bien quatre services.
+> **`k8s/todo-secret.yaml` n'est pas dans le dépôt** (il contient le mot de
+> passe en clair). Il vit sur le serveur, à côté du dépôt. S'il a disparu lui
+> aussi, le modèle est `k8s/todo-secret.example.yaml` — mais le mot de passe
+> doit alors être **celui que la base connaît déjà**, sinon l'API démarrera très
+> bien et se fera refuser par PostgreSQL.
 
-> C'est exactement le scénario que la CI/CD est censée éliminer : quelqu'un a
-> tapé une commande à la main sur la machine de production. Le déploiement
-> normal (§ 2) écrase toujours ce genre d'état.
+> **Le `rollout restart` n'est pas décoratif.** Un ConfigMap ou un Secret
+> modifié ne pousse **rien** vers un pod déjà vivant : il faut le relancer pour
+> qu'il relise son environnement. Mesuré le 6 août 2026 : `NODE_ENV` passé à
+> `staging` côté cluster, le pod continuait de répondre `production`.
 
-### 6.5 — La machine est saturée
+### 6.5 — La limite mémoire est trop basse
 
-**Signature :** aucune alarme. `up` reste à **1**, le taux d'erreur reste à
-**0 %**, tous les conteneurs sont `Up`. Seul le **débit** trahit la panne.
-
-Mesuré le 5 août 2026, avec quatre parasites bridés à un quart de cœur chacun :
-
-| | Avant | Pendant | Écart |
-| --- | --- | --- | --- |
-| Requêtes/s | 21,6 | 14,6 | **−32 %** |
-| p95 | 40 ms | 48 ms | +20 % |
-| `up` | 1 | 1 | — |
-| Taux d'erreur | 0 % | 0 % | — |
-
-**C'est la panne la plus dangereuse du lot**, précisément parce qu'aucun voyant
-ne s'allume. Elle ne se voit qu'en comparant à l'état normal — d'où le tableau
-de relevés du `README.md`, qui donne les valeurs de référence. Sans elles, 14,6
-req/s est un chiffre qui ne veut rien dire.
-
-Avec des parasites non bridés (la version du TP), l'effet serait plus violent :
-le p95 partirait en secondes et `up` finirait par clignoter. Sur cette machine,
-les parasites sont bridés parce que le CPU qu'ils brûlent est celui d'un serveur
-qui héberge un vrai site à côté.
+**Signature :** un pod de trop, en `OOMKilled` ou `CrashLoopBackOff`,
+`Exit Code: 137`, et **`kubectl logs` ne renvoie rien du tout**.
 
 ```bash
-cible 'docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}"'
+kubectl -n todo describe pod <le-pod> | grep -A3 "Last State"
 ```
 
-Les coupables sont les conteneurs qui ne font pas partie de la stack (`todo-api`,
-`todo-db`, `prometheus`, `grafana` sont légitimes) :
+**Attendu :** `Reason: OOMKilled`.
 
 ```bash
-cible 'docker ps --format "{{.Names}}" | grep -Ev "^(todo-api|todo-db|prometheus|grafana)$" | xargs -r docker rm -f'
+kubectl -n todo patch deployment todo-api --type=json \
+  -p='[{"op":"remove","path":"/spec/template/spec/containers/0/resources"}]'
+kubectl -n todo rollout status deployment/todo-api --timeout=180s
+kubectl apply -f k8s/todo-api-deployment.yaml   # remet les valeurs versionnées
 ```
 
-**Vérification :** `docker stats --no-stream` montre les quatre services
-légitimes sous 20 % de CPU, et le p95 redescend sous 50 ms en moins de deux
-minutes.
+> **`kubectl apply -f` ne suffit PAS à réparer cette panne**, et c'est le piège
+> le plus coûteux des cinq. Vérifié deux fois le 6 août 2026 :
+>
+> | Tentative | `resources` après |
+> | --- | --- |
+> | `kubectl apply -f k8s/todo-api-deployment.yaml` | `{"limits":{"memory":"8Mi"}}` — inchangé |
+> | `kubectl apply --server-side --force-conflicts -f …` | `{"limits":{"memory":"8Mi"}}` — inchangé |
+> | `kubectl patch … --type=json -p '[{"op":"remove",…}]'` | `{}` ✅ |
+>
+> `apply` ne supprime que les champs **qu'il a lui-même posés** auparavant. Un
+> champ ajouté par `kubectl patch` appartient à un autre propriétaire, et un
+> manifeste qui n'en parle pas ne le retire pas — il ne le mentionne
+> simplement pas. **Il faut retirer le champ explicitement.**
 
-### 6.6 — La machine cible elle-même a disparu
+Les valeurs légitimes, trouvées par l'échec (phase 12, détail au `README.md`) :
+`requests` 24Mi / 50m, `limits` 48Mi / 500m. Le plancher mesuré est entre 20Mi
+(OOMKilled) et 24Mi (tenu).
 
-**Signature :** `cible hostname` ne répond pas du tout, `docker ps` **sur le
-serveur** ne montre pas de conteneur `vm-prod`.
+### 6.6 — Le cluster lui-même a disparu
+
+**Signature :** `kubectl` répond
+`The connection to the server ... was refused`, ou `k3d cluster list` ne montre
+pas `todo-cluster`.
 
 ```bash
-cd ~/tp-devops-todo-api
-./deploy/vm-prod.sh up          # reconstruit et redémarre la machine cible
-cible 'mkdir -p /srv/todo'
-scp -i deploy/deploy_key -P 2222 deploy/env.example root@127.0.0.1:/srv/todo/.env
-cible 'vi /srv/todo/.env'       # renseigner DB_PASSWORD et GRAFANA_ADMIN_PASSWORD
+k3d cluster list
+k3d cluster start todo-cluster        # s'il existe mais est arrêté
 ```
 
-Puis relancer la pipeline (onglet *Actions* → *CI* → *Run workflow* sur `main`)
-pour qu'elle y redépose `compose.yml`, `prometheus.yml`, `apply.sh` et
-`grafana/`.
+S'il n'existe plus du tout, il se reconstruit — **et les données de la base sont
+perdues**, la PVC vit dans le nœud :
 
-**Vérification :** `./deploy/vm-prod.sh status` affiche `running`, `ok`, et le
-`{"status":"ok"}` de l'API.
+```bash
+docker stop vm-prod 2>/dev/null      # libère le port 8080 et de la RAM
+k3d cluster create todo-cluster -p "8080:80@loadbalancer"
+kubectl create namespace todo
+kubectl apply -f k8s/todo-secret.yaml     # le fichier hors dépôt, d'abord
+kubectl apply -f k8s/todo-config.yaml -f k8s/todo-db.yaml \
+               -f k8s/todo-api-deployment.yaml -f k8s/todo-api-service.yaml \
+               -f k8s/todo-ingress.yaml
+kubectl -n todo rollout status deployment/todo-api --timeout=300s
+```
 
-> Si `deploy/deploy_key` a été perdue, il faut regénérer la paire
-> (`ssh-keygen -t ed25519 -N "" -f deploy/deploy_key`), reconstruire l'image de
-> la machine cible (la clé publique y est incluse) **et** remplacer le secret
-> `DEPLOY_SSH_KEY` du dépôt. Les données de la base survivent, elles sont dans
-> un volume Docker.
+**Vérification :** `kubectl get nodes` montre `k3d-todo-cluster-server-0` en
+`Ready`, et `curl -H "Host: todo.localhost" http://127.0.0.1:8080/health` répond
+`ok`.
+
+> **L'ordre compte :** le Secret d'abord. `todo-db.yaml` lit `DB_NAME`,
+> `DB_USER` et `DB_PASSWORD` dedans, et un pod PostgreSQL démarré sans eux crée
+> une base avec de mauvais identifiants — que l'API ne pourra plus joindre.
+
+### 6.7 — Les pods vont bien, l'Ingress ne sert rien
+
+**Signature :** `kubectl -n todo get pods` montre 3 pods `1/1`, et pourtant
+`curl` répond **404** ou **502**.
+
+```bash
+kubectl -n todo get ingress,svc,endpoints
+```
+
+| Ce que vous voyez | Ce qui s'est passé |
+| --- | --- |
+| `endpoints todo-api` vide (`<none>`) | le `selector` du Service ne colle à aucun pod. Mesuré : 3 pods `Running` et **44 requêtes sur 44 en 503** |
+| `404` sur `/health` mais `200` sur `/api/tasks` | la règle de l'Ingress porte un `path` trop étroit (`/api` au lieu de `/`) |
+| `404` sur tout, avec l'en-tête `Host` correct | le `backend.service.port.number` de l'Ingress ne correspond à aucun port du Service. Traefik ne crée alors **aucune** route et répond 404 — **pas** une erreur de passerelle |
+| `404` sur tout, **sans** en-tête `Host` | ce n'est pas une panne : voir l'encadré du § 1 |
+
+```bash
+kubectl apply -f k8s/todo-api-service.yaml -f k8s/todo-ingress.yaml
+```
 
 ---
 
@@ -519,17 +576,26 @@ pour qu'elle y redépose `compose.yml`, `prometheus.yml`, `apply.sh` et
 
 Cette procédure ne prévoit pas :
 
-- **le port 13000 déjà occupé sur le serveur par autre chose.** `apply.sh`
-  échouerait sur `port is already allocated`. Trouver le coupable avec
-  `sudo ss -ltnp | grep 13000` ; si ce n'est pas `vm-prod`, c'est un processus
-  hors Docker et il faut décider avec son propriétaire avant de le tuer.
-- **une corruption des données.** Aucune sauvegarde de la base n'existe
-  aujourd'hui : le volume `pgdata` est la seule copie. C'est un manque assumé
-  pour un TP, et le premier à combler pour un vrai service.
+- **la surveillance du cluster.** Le Prometheus et le Grafana du jour 3 tournent
+  dans `vm-prod`, qui est arrêtée, et ne scrutent rien du cluster. Les quatre
+  *golden signals* ne sont donc plus visibles en continu : il n'existe
+  aujourd'hui **aucune alerte** qui préviendrait d'un pod bloqué. C'est le
+  premier manque à combler, et il est d'autant plus important que les cinq
+  pannes du § 6 ne coupent pas le service — donc personne ne les signale.
+- **une corruption des données.** Aucune sauvegarde de la base n'existe : la PVC
+  `todo-db-data` est la seule copie, et elle vit sur le disque du nœud k3d.
+  Détruire le cluster détruit les données. Manque assumé pour un TP, et le
+  premier à combler pour un vrai service.
+- **le port 8080 déjà occupé sur le serveur.** `k3d cluster create` échouerait.
+  Trouver le coupable avec `ss -ltnp | grep 8080` ; sur cette machine c'est
+  presque toujours la stack `docker compose` du jour 1
+  (`docker stop todo-todo-api-1`).
 - **le runner self-hosted arrêté.** Les jobs restent `Queued` indéfiniment, sans
   message d'erreur. Vérifier avec
-  `pgrep -af 'actions-runner.*Runner.Listener'` sur le serveur, relancer avec
+  `pgrep -af 'actions-runner.*Runner.Listener'`, relancer avec
   `cd ~/actions-runner && nohup ./run.sh > runner.log 2>&1 &`.
+- **`kubectl` absent du PATH du runner.** Le job de déploiement le vérifie en
+  première étape et le dit explicitement — mais il ne l'installe pas.
 
 ---
 
@@ -541,13 +607,17 @@ d'un moment où quelqu'un s'est trouvé bloqué devant ce document.
 | Date | Ce qui manquait | Correction |
 | --- | --- | --- |
 | 2026-08-05 | Le § 1 ne disait pas comment vérifier qu'on était bien sur la machine cible et pas sur le serveur hôte. Deux Docker différents, les mêmes commandes. | Ajout du `cible hostname` et de son résultat attendu. |
-| 2026-08-05 | Les pannes 6.1, 6.3 et 6.4 donnaient toutes `up = 0` et se réparaient différemment. | Ajout de la colonne `docker ps` au tableau, et de l'encadré qui les sépare. |
-| 2026-08-05, **après le 1ᵉʳ incident réel** | Le tableau disait « `todo-api` absent » pour 6.1 et « `Exited`ou `Restarting` » pour 6.4 — or 6.1 laisse aussi un conteneur `Exited`. Les deux lignes étaient indiscernables au moment où il fallait choisir. | Le critère devient le **code de sortie** : `Exited (0)` = arrêt propre (6.1), `Exited (1)` = plantage au démarrage (6.4). Ajouté au tableau et au § 6.1. |
-| 2026-08-05, **après le 1ᵉʳ incident réel** | Rien ne disait de lire les logs par la fin. Huit lignes `ENOTFOUND todo-db` d'un incident précédent précédaient la ligne utile et pointaient vers la mauvaise section. | Ajout de l'avertissement sous le réflexe n° 1, et passage de `--tail=40` à `--tail 10`. |
-| 2026-08-05, **après le 1ᵉʳ incident réel** | Le panneau *Trafic* était lu comme « plus personne n'appelle », alors que c'est le générateur de charge qui était mort avec la panne (`set -e` + `curl` en échec). | `scripts/charge.sh` survit désormais à sa cible, et la procédure prévient de ne pas conclure depuis ce panneau seul. |
-| 2026-08-05, **après avoir cassé `main` exprès 3 fois** | Rien ne disait ce qu'un job rouge implique pour la production. Or un `Deploiement` qui échoue à l'étape de vérification laisse **la nouvelle version en train de tourner** — supposer l'inverse ferait revenir en arrière une version qui n'est pas celle qu'on croit. | Ajout du tableau « quand un job est rouge » au § 2, et du réflexe `grep ^TAG=` avant toute décision. |
-| 2026-08-05, **après vérification des pannes 3, 4 et 5** | Les signatures 6.3, 6.4 et 6.5 étaient **raisonnées, pas observées** — le tirage au sort n'avait donné que les pannes 1 et 2. Les trois ont été déclenchées délibérément, et 6.5 était franchement fausse : annoncée avec un `up` qui clignote et des timeouts, elle ne produit en réalité aucune erreur et aucun changement de `up`. | Les cinq lignes du tableau sont désormais mesurées. 6.5 devient « aucune alarme, seulement −32 % de débit », avec ses valeurs avant/pendant. |
-| 2026-08-05, **après vérification de la panne 3** | Rien ne disait que le conteneur reste **`Up (healthy)`** : son `HEALTHCHECK` interroge `127.0.0.1` depuis l'intérieur et réussit toujours. Ni que les logs ne contiennent **aucune erreur**. Un `docker ps` lu vite fait chercher ailleurs. | Les deux ajoutés au § 6.3, avec la combinaison qui identifie la panne : `up = 0` **et** conteneur `Up`. |
-| 2026-08-05, **après vérification de la panne 4** | La règle « lire les logs par la fin » était fausse pour un conteneur qui plante au démarrage : le message utile était en **ligne 5 sur 17**, et `--tail 10` n'affichait que la pile d'appels. | Deux règles au lieu d'une, choisies par le statut : `Exited (0)` → par la fin, `Exited (1)` → par le début. |
-| 2026-08-05, **après le 2ᵉ incident réel** | La procédure envoyait vers le tableau de bord en premier. Or les panneaux 2 à 4 reposent sur `rate([1m])` : au 2ᵉ incident, cinq secondes après l'arrêt de la base, le panneau *Erreurs* affichait encore 0,000 %. `docker ps -a`, lui, montrait déjà `todo-db  Exited (0) 5 seconds ago`. | Ajout de l'encadré sur la latence du tableau de bord, et inversion explicite de l'ordre : les deux commandes d'abord, Grafana ensuite. |
-| 2026-08-05, **en se servant du retour arrière** | Toute la procédure fait lire `grep ^TAG= /srv/todo/.env` pour répondre à « quelle version tourne ? ». Or `apply.sh` écrivait ce sha **avant** de télécharger l'image : un retour arrière vers un sha sans image laissait le `.env` annoncer une version qui ne tournait pas. Le seul fichier que la procédure fait lire pendant une panne mentait, et il mentait précisément dans le cas où on le lit. | `apply.sh` télécharge d'abord, n'écrit qu'ensuite. Deux encadrés ajoutés au § 4 : le `.env` est désormais fiable par construction, et un sha sans image échoue sans rien changer. |
+| 2026-08-05 | Les pannes donnant toutes `up = 0` se réparaient différemment. | Ajout de la colonne `docker ps` au tableau, et de l'encadré qui les sépare. |
+| 2026-08-05, **après le 1ᵉʳ incident réel** | Le critère `Exited` ne séparait pas un arrêt propre d'un plantage au démarrage. | Le critère devient le **code de sortie** : `Exited (0)` = arrêt propre, `Exited (1)` = plantage. |
+| 2026-08-05, **après le 1ᵉʳ incident réel** | Rien ne disait de lire les logs par le bon bout. Des lignes d'un incident précédent pointaient vers la mauvaise section. | Deux règles au lieu d'une, choisies par le statut du conteneur. |
+| 2026-08-05, **après le 1ᵉʳ incident réel** | Le panneau *Trafic* était lu comme « plus personne n'appelle », alors que c'est le générateur de charge qui était mort avec la panne. | `scripts/charge.sh` survit désormais à sa cible, et la procédure prévient de ne pas conclure depuis ce panneau seul. |
+| 2026-08-05, **après avoir cassé `main` exprès 3 fois** | Rien ne disait ce qu'un job rouge implique pour la production. | Ajout du tableau « quand un job est rouge » au § 2. |
+| 2026-08-05, **après vérification des pannes 3, 4 et 5** | Trois signatures sur cinq étaient **raisonnées, pas observées**, et l'une d'elles était franchement fausse. | Les cinq lignes du tableau sont désormais mesurées. |
+| 2026-08-05, **en se servant du retour arrière** | `apply.sh` écrivait le sha **avant** de télécharger l'image : le seul fichier que la procédure fait lire pendant une panne mentait. | `apply.sh` télécharge d'abord, n'écrit qu'ensuite. |
+| **2026-08-06, passage au cluster** | Toute la procédure décrivait une machine unique, un `docker compose` et une clé SSH. Rien de tout ça n'existe plus. | Réécriture, pas duplication : § 0 qui met les gestes d'hier et d'aujourd'hui en regard, et tous les § adaptés à `kubectl`. Le fichier garde son nom et son historique. |
+| **2026-08-06, après avoir joué les 5 pannes** | Le § 2 d'hier avertissait qu'un job rouge pouvait laisser la nouvelle version en place. Avec le gate sur `rollout status`, c'est l'**inverse** : un job rouge garantit que l'ancienne version sert toujours. Garder l'avertissement d'hier ferait revenir en arrière une version qui n'a jamais été déployée. | Tableau du § 2 refait, et la garantie énoncée en clair. |
+| **2026-08-06, après avoir joué les 5 pannes** | Aucune des cinq ne coupe le service. Une procédure qui ne le dit pas laisse croire qu'un service qui répond est un service sain. | Encadré en tête du § 6, et le compte de pods promu au rang d'indicateur n° 1. |
+| **2026-08-06, en réparant la panne 5** | Le réflexe légitime, `kubectl apply -f` sur le manifeste versionné, **ne répare pas** la panne 5 — même en `--server-side --force-conflicts`. Suivre la procédure au mot près laissait le pod en `OOMKilled` en croyant l'avoir réparé. | § 6.5 réécrit avec les trois tentatives mesurées et le `patch remove` qui, seul, fonctionne. |
+| **2026-08-06, en chronométrant le retour arrière** | La vérification tenait en un `curl`. Or `rollout status` rend la main 3,7 s avant que tous les pods aient basculé : ce `curl` unique pouvait tomber sur un ancien pod et faire croire à un échec. | Encadré au § 4 avec les deux durées mesurées, et la consigne de répéter la requête. |
+| **2026-08-06, en relisant le § 6.6 à voix haute** | La reconstruction du cluster appliquait les manifestes dans l'ordre du dossier, Secret compris — or `todo-db.yaml` lit ses identifiants dedans. Un PostgreSQL démarré avant le Secret crée une base que l'API ne pourra jamais joindre. | L'ordre est explicite : le Secret d'abord, avec la raison. |
+| **2026-08-06, sur un incident tiré au sort, numéro inconnu à l'avance** | Le tableau annonçait `OOMKilled` dans la colonne `kubectl get pods` pour la panne 6.5. En vrai, elle s'affichait `CrashLoopBackOff` — **exactement comme la 6.4**. Suivi au mot près, le document envoyait au § 6.4, où le `kubectl logs` recommandé ne renvoie rien du tout (le noyau tue avant que quoi que ce soit soit écrit) : impasse complète, sur la seule panne du lot qui n'écrit aucun log. | La colonne `get pods` de 6.5 dit désormais « la même chose que 6.4 », l'encadré affirme en toutes lettres que `get pods` **ne suffit pas**, et le critère devient le `Exit Code` relevé par `describe`, avec la commande exacte. |
