@@ -1401,6 +1401,62 @@ lui attribuer un mérite qui n'est pas le sien.
 
 ---
 
+## Jour 4, phase 9 — le retour arrière, chronomètre en main
+
+Même exercice qu'hier, même régression volontaire : le champ `status` retiré de
+`GET /api/tasks`. Hier l'image fautive était sur GHCR, taguée au sha de son
+commit ; aujourd'hui elle est construite localement et importée dans le cluster
+(`todo-api:regression-j4`), puis poussée par un `kubectl set image` direct.
+
+| | Jour 3, `apply.sh <sha>` | Jour 4, `kubectl rollout undo` |
+| --- | --- | --- |
+| Constat → service rétabli | **2 s** | **24,7 s** |
+| Ce qu'il fallait savoir pour agir | le sha exact de la version d'avant | rien du tout |
+| Ce qui a coupé pendant l'opération | tout | rien |
+
+**Le cluster est douze fois plus lent, et c'est le bon échange.** Les deux
+secondes d'hier étaient un `docker compose up -d` qui arrête et redémarre : une
+coupure franche, mais courte. Les 24,7 secondes d'aujourd'hui sont trois pods
+remplacés un par un pendant que le service continue de répondre. On a échangé de
+la vitesse contre l'absence de trou — exactement le même arbitrage qu'en
+phase 8, et il se lit dans les mêmes ordres de grandeur.
+
+L'autre écart n'est pas dans le tableau et compte davantage : hier, il fallait
+**connaître le sha de la version d'avant** pour taper la commande. Aujourd'hui,
+`rollout undo` sans argument suffit — le cluster garde lui-même l'historique de
+ce qu'il a fait tourner.
+
+### Ce que `rollout status` ne dit pas
+
+Première mesure : 21,0 s, `rollout status` rendu, tout semble fini. Sauf que la
+requête suivante répondait encore faux une fois sur deux. Les anciens pods sont
+encore dans les endpoints du Service pendant leur `preStop` de 5 secondes — ceux
+de la phase 8, qui empêchent de perdre des requêtes, retardent d'autant le
+moment où *plus personne* ne voit l'ancienne version.
+
+`scripts/mesure-rollback.sh` exige donc **30 bonnes réponses consécutives**, une
+seule mauvaise remettant le compteur à zéro. D'où l'écart entre les deux
+chiffres, et le second est le seul honnête :
+
+| Critère d'arrêt du chronomètre | Durée |
+| --- | --- |
+| `kubectl rollout status` rend la main | 21,0 s |
+| 30 réponses saines d'affilée | **24,7 s** |
+
+### Les deux autres vérifications
+
+- **`rollout history` liste plusieurs révisions**, et `--to-revision=N` cible
+  n'importe laquelle. Vérifié en revenant directement à la révision 21
+  (`f692c37…`) alors que la précédente était `aa1e8a4…`. À noter : les numéros
+  de révision ne sont pas contigus — 3, 4, 5, 6, 7, 9, 21, 22, 23, 27, 28 dans
+  l'historique du jour. Chercher « la révision d'avant » en soustrayant 1 mène
+  droit à un `error: unable to find specified revision`.
+- **Un `undo` sans rien à annuler échoue proprement** :
+  `error: no rollout history found for deployment "essai-undo"`, code de sortie
+  1, et le Deployment reste exactement dans l'état où il était.
+
+---
+
 ## Ce qui reste ouvert
 
 ### Refermé au jour 3
