@@ -1780,6 +1780,114 @@ constate qu'il n'a aucun chemin vers eux, et c'est le résultat attendu.
 
 ---
 
+## Jour 4, après coup — deux affirmations fausses, corrigées
+
+Deux lignes écrites plus haut dans ce fichier étaient fausses. Les voici, et ce
+qu'il a fallu faire pour qu'elles deviennent vraies.
+
+### « Aucune limite de ressources » — faux pour la base
+
+`requests` et `limits` avaient été posés sur l'API, sur Prometheus et sur
+Grafana. Pas sur PostgreSQL, c'est-à-dire sur le seul pod dont l'`OOMKill`
+coûterait des données.
+
+**Et la méthode de la phase 12 donne ici une valeur mortelle.** Démonstration en
+trois temps, le 6 août 2026 :
+
+| | Ce qui s'est passé |
+| --- | --- |
+| 1. `kubectl top` sur la base | **23 à 29 Mi**, au repos comme sous quatre générateurs de charge |
+| 2. `limits.memory: 64Mi`, plus du double du pic | 169 requêtes HTTP, **0 échec**, pod `1/1`. **La mesure approuve.** |
+| 3. Une seule requête un peu gourmande — `SELECT array_agg(g) FROM generate_series(1,4000000) g`, le genre qu'un endpoint de statistiques écrit sans y penser | **`OOMKilled`, `Exit Code: 137`.** La base emportée. |
+
+Pourquoi la mesure ment ici et pas sur l'API : Postgres **réserve** 128 MiB de
+`shared_buffers` au démarrage — lu dans `pg_settings`, pas deviné — et n'en
+touche presque rien tant que la charge reste légère. La mémoire résidente d'une
+base au repos ne dit **rien** de ce dont elle a besoin le jour où elle
+travaille.
+
+Le bon chiffre vient donc de la configuration :
+
+```
+shared_buffers        128 MiB   réservés au démarrage
+maintenance_work_mem   64 MiB   pendant un VACUUM ou un REINDEX
+work_mem                4 MiB   par tri, par connexion
+```
+
+D'où `requests: 160Mi` (ce que la base tient réellement en permanence,
+`shared_buffers` compris — c'est ce que le scheduler réserve) et
+`limits: 256Mi`. La requête qui tuait le pod à 64Mi rend son résultat sans
+incident.
+
+**La leçon générale** : serrer jusqu'à l'échec marche pour un process dont la
+mémoire suit la charge. Elle ne marche pas pour un process qui réserve à
+l'avance. Il faut savoir lequel on mesure avant de choisir la méthode.
+
+### « Une machine qui tombe ne coupe plus rien » — faux, il n'y avait qu'un nœud
+
+C'était l'objectif du jour 4, écrit dans l'énoncé, et je l'ai repris tel quel
+dans une pull request. `kubectl get nodes` en montrait **un seul**. Trois copies
+posées sur la même machine protègent d'un pod qui meurt, pas de la machine qui
+s'arrête.
+
+Un nœud agent a été ajouté (`k3d node create agent-1`), et les trois copies
+réparties par une `topologySpreadConstraints` — en `ScheduleAnyway` et non
+`DoNotSchedule` : en contrainte dure, un nœud indisponible, précisément le cas
+contre lequel elle existe, empêcherait le pod de se placer ailleurs et bloquerait
+le rollout.
+
+Résultat : 2 copies sur l'agent, 1 sur le serveur, et le trafic atteint bien les
+deux — 57, 58 et 57 requêtes sur 171.
+
+### Ce que coûte vraiment la perte d'un nœud, et le chiffre que j'ai d'abord annoncé faux
+
+`docker stop k3d-agent-1-0` sous charge, deux copies sur trois emportées d'un
+coup :
+
+| | |
+| --- | --- |
+| Requêtes échouées | **15 sur 910** |
+| Fenêtre de dégradation | **13:31:34 → 13:32:18, soit 44 secondes** |
+| Débit pendant l'incident | 6 req/s au lieu de 9 |
+| Retour à la normale | seul, sans commande |
+
+**Premier relevé annoncé : 2,4 secondes. C'était faux d'un facteur vingt.** Les
+échecs portaient les numéros 45 à 69, et j'ai lu ces numéros comme une durée —
+24 requêtes à 100 ms, donc 2,4 secondes. Sauf qu'une requête qui échoue consomme
+les 3 secondes du `-m 3` de curl, là où une réponse saine en prend cinq
+millisecondes. **Le compteur de requêtes n'est pas une horloge.**
+
+`scripts/charge-cluster.sh` horodate donc maintenant chaque échec, et affiche le
+débit effectif à la fin — un débit très en dessous des ~9 req/s attendus trahit
+du temps passé en timeouts, ce que le seul compteur d'échecs cache.
+
+Les 44 secondes ne sont pas un défaut de configuration : c'est le temps que met
+le control plane à déclarer un nœud `NotReady` et à retirer ses pods des
+endpoints du Service. Pendant tout ce temps, les deux pods morts sont encore
+listés comme prêts, et une requête sur trois part vers eux. Le réglage qui
+raccourcirait cette fenêtre est `--node-monitor-grace-period`, un drapeau du
+serveur k3s — pas touché, parce qu'un cluster qui déclare un nœud mort trop vite
+migre des pods au premier hoquet réseau.
+
+### Ce que le second nœud n'achète PAS
+
+À dire clairement, parce que la formule de l'énoncé invite à croire l'inverse :
+
+| Ce qui tombe | Ce qui se passe |
+| --- | --- |
+| Le nœud agent | 44 s de service dégradé, puis la copie restante encaisse tout. **Le service survit.** |
+| **Le nœud serveur** | PostgreSQL, Prometheus, Grafana, Traefik et le control plane y vivent tous. **Tout s'arrête.** |
+
+Les trois PVC sont provisionnées par `local-path`, c'est-à-dire sur le disque du
+nœud qui les porte : un pod attaché à l'une d'elles ne peut pas se déplacer.
+Répartir la base demanderait un stockage réseau, et la répliquer demanderait un
+opérateur PostgreSQL. C'est un autre TP.
+
+Ce qui est vrai aujourd'hui, et suffisant à dire : **la couche sans état survit
+à la perte d'une machine sur deux, la couche de données non.**
+
+---
+
 ## Ce qui reste ouvert
 
 ### Refermé au jour 3
@@ -1800,9 +1908,10 @@ constate qu'il n'a aucun chemin vers eux, et c'est le résultat attendu.
   sur 382**, mesuré sous charge pendant un rolling update complet. Et le
   correctif n'est pas celui qu'on croyait : `maxUnavailable: 0` n'y est pour
   rien, c'est un `preStop` de 5 secondes qui a annulé la coupure.
-- ~~**Aucune limite de ressources.**~~ `requests` 24Mi / 50m, `limits`
-  48Mi / 500m, trouvées en serrant jusqu'à l'`OOMKilled` puis en revenant en
-  arrière — pas en devinant.
+- ~~**Aucune limite de ressources.**~~ Sur l'API : `requests` 24Mi / 50m,
+  `limits` 48Mi / 500m, trouvées en serrant jusqu'à l'`OOMKilled`. Sur la base,
+  `requests` 160Mi / `limits` 256Mi — et **pas** par la même méthode, qui
+  bénissait une valeur mortelle : voir plus bas.
 - ~~**Rien ne relève l'application si elle plante à 3 h du matin.**~~ Mesuré :
   un pod supprimé revient en 14 secondes, un processus tué dans son conteneur
   en 13, sans qu'aucune commande soit tapée.
@@ -1832,6 +1941,15 @@ constate qu'il n'a aucun chemin vers eux, et c'est le résultat attendu.
 - **Pas de restauration à une date précise.** Le CronJob tourne toutes les six
   heures : au pire, six heures de saisie sont perdues. Réduire cette fenêtre
   demande l'archivage des WAL, un autre sujet.
+- **La couche de données ne survit pas à la perte d'une machine.** PostgreSQL,
+  Prometheus et Grafana sont épinglés au nœud qui porte leur PVC `local-path`.
+  Le nœud serveur porte en plus le control plane et Traefik : s'il tombe, tout
+  s'arrête. Répartir la base demanderait un stockage réseau, la répliquer un
+  opérateur PostgreSQL.
+- **44 secondes de service dégradé quand un nœud tombe**, le temps que le
+  control plane le déclare `NotReady` et retire ses pods des endpoints. Mesuré.
+  `--node-monitor-grace-period` raccourcirait la fenêtre, au prix de pods migrés
+  au premier hoquet réseau.
 - **La passation de la phase 10 a été jouée seul**, les deux rôles tenus par la
   même personne. La procédure n'a donc jamais été confrontée à quelqu'un qui ne
   l'avait pas écrite — le seul test qui la valide vraiment.
