@@ -272,6 +272,7 @@ jobs:
           kubectl --context "$CTX" apply \
             -f k8s/todo-config.yaml \
             -f k8s/todo-db.yaml \
+            -f k8s/todo-db-sauvegarde.yaml \
             -f k8s/todo-api-deployment.yaml \
             -f k8s/todo-api-service.yaml \
             -f k8s/todo-ingress.yaml
