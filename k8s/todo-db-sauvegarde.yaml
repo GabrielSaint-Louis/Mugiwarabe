@@ -1,0 +1,128 @@
+# La sauvegarde de la base, ouverte depuis le jour 3.
+#
+# Ce qui etait ecrit noir sur blanc dans "Ce qui reste ouvert" : la PVC
+# todo-db-data est la seule copie des donnees, et elle vit sur le disque du
+# noeud k3d. Detruire le cluster detruit les donnees. Un CronJob n'efface pas
+# ce risque — les deux volumes vivent sur la meme machine — mais il couvre le
+# cas de loin le plus frequent : la table videe, la migration ratee, le
+# `DELETE` sans `WHERE`.
+#
+# Ce qu'il ne couvre PAS, et qui reste ecrit au § 7 de la procedure : la perte
+# du noeud. Une vraie sauvegarde part ailleurs que sur la machine qu'elle
+# protege. C'est la prochaine marche, pas celle-ci.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: todo-db-sauvegardes
+  namespace: todo
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      # Une PVC distincte de celle des donnees, et c'est le point : une
+      # sauvegarde posee sur le meme volume que ce qu'elle sauvegarde ne
+      # sauvegarde rien.
+      storage: 1Gi
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: todo-db-sauvegarde
+  namespace: todo
+spec:
+  # Toutes les six heures. Assez frequent pour qu'une bevue ne coute jamais
+  # plus de six heures de saisie, assez rare pour que quatre dumps par jour
+  # tiennent dans 1Gi avec la rotation ci-dessous.
+  schedule: "0 */6 * * *"
+  # Forbid : si un dump traine encore, on ne lance pas le suivant par-dessus.
+  # Deux pg_dump concurrents sur la meme base, c'est de la charge pour rien et
+  # deux fichiers incomplets.
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  # 30 min : un dump de cette base prend moins d'une seconde. Au-dela, quelque
+  # chose est bloque, et il vaut mieux echouer visiblement que rester pendu.
+  startingDeadlineSeconds: 300
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 1800
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: pg-dump
+              # La MEME image majeure que le serveur. Un pg_dump de version
+              # inferieure au serveur refuse de tourner ("server version
+              # mismatch") — panne classique, et elle n'apparait qu'au premier
+              # passage du CronJob, six heures apres qu'on ait tout installe.
+              image: postgres:16-alpine
+              env:
+                - name: PGHOST
+                  value: todo-db
+                - name: PGPORT
+                  value: "5432"
+                - name: PGDATABASE
+                  valueFrom:
+                    secretKeyRef: { name: todo-secret, key: DB_NAME }
+                - name: PGUSER
+                  valueFrom:
+                    secretKeyRef: { name: todo-secret, key: DB_USER }
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef: { name: todo-secret, key: DB_PASSWORD }
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -eu
+                  HORODATAGE=$(date -u +%Y%m%dT%H%M%SZ)
+                  CIBLE="/sauvegardes/todo-${HORODATAGE}.sql.gz"
+
+                  echo "== dump vers $CIBLE =="
+                  # On ecrit dans un fichier .partiel qu'on renomme a la fin.
+                  # Un dump interrompu laisse alors un .partiel visible, jamais
+                  # un .sql.gz tronque qu'on croirait bon le jour ou il sert.
+                  #
+                  # --clean --if-exists : DECOUVERT EN ESSAYANT DE RESTAURER,
+                  # pas en ecrivant ce fichier. Sans ces deux options, le dump
+                  # ne contient que des CREATE TABLE, et le rejouer sur une base
+                  # ou la table existe encore — c'est-a-dire dans le cas le plus
+                  # frequent, une table videe par erreur — s'arrete sur
+                  # "ERROR: relation tasks already exists". La sauvegarde
+                  # existait, elle etait valide, et elle ne se restaurait pas.
+                  pg_dump --no-owner --no-privileges --clean --if-exists \
+                    | gzip -9 > "${CIBLE}.partiel"
+                  mv "${CIBLE}.partiel" "$CIBLE"
+
+                  # Un dump vide pese ~20 octets une fois gzippe. En dessous de
+                  # 100, quelque chose s'est mal passe sans le dire.
+                  TAILLE=$(wc -c < "$CIBLE")
+                  if [ "$TAILLE" -lt 100 ]; then
+                    echo "ECHEC : le dump ne fait que $TAILLE octets." >&2
+                    exit 1
+                  fi
+                  echo "dump ecrit, $TAILLE octets"
+
+                  echo "== rotation : on garde les 12 derniers (3 jours) =="
+                  # ls -1t trie du plus recent au plus ancien ; on supprime a
+                  # partir du treizieme. Sans rotation, la PVC se remplit et
+                  # c'est la sauvegarde elle-meme qui finit par tout casser.
+                  cd /sauvegardes
+                  ls -1t todo-*.sql.gz 2>/dev/null | tail -n +13 | while read -r vieux; do
+                    echo "   suppression de $vieux"
+                    rm -f "$vieux"
+                  done
+
+                  echo "== ce qui est en place =="
+                  ls -lh /sauvegardes
+              volumeMounts:
+                - name: sauvegardes
+                  mountPath: /sauvegardes
+              resources:
+                requests: { memory: 32Mi, cpu: 50m }
+                limits: { memory: 128Mi, cpu: 500m }
+          volumes:
+            - name: sauvegardes
+              persistentVolumeClaim:
+                claimName: todo-db-sauvegardes

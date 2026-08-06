@@ -272,9 +272,20 @@ jobs:
           kubectl --context "$CTX" apply \
             -f k8s/todo-config.yaml \
             -f k8s/todo-db.yaml \
+            -f k8s/todo-db-sauvegarde.yaml \
             -f k8s/todo-api-deployment.yaml \
             -f k8s/todo-api-service.yaml \
             -f k8s/todo-ingress.yaml
+
+      # La surveillance est du code au meme titre que le reste : le tableau de
+      # bord et les alertes partent d'ici a chaque deploiement, exactement comme
+      # le dossier grafana/ partait en scp hier. Un panneau bricole a la souris
+      # pendant une astreinte est ecrase au deploiement suivant — c'est le
+      # comportement voulu.
+      - name: Envoyer la surveillance
+        env:
+          KCTX: ${{ env.CTX }}
+        run: ./k8s/monitoring/appliquer.sh
 
       # LA commande de deploiement. Elle vient APRES l'apply, jamais avant :
       # l'apply remet le tag ecrit dans le fichier, cette ligne pose celui du

@@ -157,7 +157,18 @@ tp-devops-todo-api/
 │    ├── todo-secret.example.yaml # le modèle ; todo-secret.yaml n'est JAMAIS commité
 │    ├── todo-db.yaml             # PVC + PostgreSQL + son Service
 │    ├── todo-ingress.yaml        # la porte d'entrée, sur todo.localhost
-│    └── chaos.sh                 # les 5 pannes de l'exercice de diagnostic
+│    ├── chaos.sh                 # les 5 pannes de l'exercice de diagnostic
+│    ├── todo-db-sauvegarde.yaml  # CronJob pg_dump toutes les 6 h + sa PVC
+│    └── monitoring/              # Prometheus et Grafana, dans le cluster
+│         ├── prometheus-rbac.yaml    # le droit de lire les pods, et rien d'autre
+│         ├── prometheus-config.yaml  # decouverte par annotation, pas de cible en dur
+│         ├── prometheus.yaml
+│         ├── grafana.yaml            # + le second Ingress, grafana.localhost
+│         ├── datasource.yml
+│         ├── dashboards-provider.yml
+│         ├── grafana-dashboard.json  # adapte a 3 copies (panneaux 1, 1 bis, 5, 7)
+│         ├── alertes.yml             # 4 alertes, dont 2 nees du jour 4
+│         └── appliquer.sh            # les fichiers deviennent des ConfigMaps
 ├── docs/PROCEDURE_DEPLOIEMENT.md # ce qu'on lit à 3 h du matin — version cluster
 ├── scripts/
 │    ├── measure.sh               # les 4 métriques du chapitre 10
@@ -167,7 +178,8 @@ tp-devops-todo-api/
 │    ├── repartition.sh           # J4 : ce que chaque pod a vraiment reçu
 │    ├── mesure-rollout.sh        # J4 : un rolling update chronométré sous charge
 │    ├── mesure-rollback.sh       # J4 : le retour arrière, chronométré
-│    └── serrer-memoire.sh        # J4 : jusqu'où serrer limits.memory avant l'OOM
+│    ├── serrer-memoire.sh        # J4 : jusqu'où serrer limits.memory avant l'OOM
+│    └── restaurer.sh             # J4 : lister et restaurer une sauvegarde
 ├── exercices/j2-echauffement/    # les 4 fichiers cassés du J2 et leurs corrigés
 ├── tests/
 │    ├── unit/                    # 22 cas, sans base
@@ -1607,6 +1619,105 @@ du jour 3 avait montré, faute justement de limite.
 
 ---
 
+## Jour 4, après coup — les trois manques refermés
+
+Le jour 4 fermait quatre limites du jour 3 et en ouvrait une nouvelle. Voici ce
+qui a été fait des unes et de l'autre.
+
+### 1. La surveillance, et l'alerte qui n'existait pas
+
+Prometheus et Grafana tournent dans le cluster. Deux changements de fond par
+rapport à la stack du jour 3, et chacun vient d'une propriété du cluster.
+
+**Prometheus ne nomme plus ses cibles.** Le fichier d'hier écrivait
+`targets: ['todo-api:3000']`. Avec trois copies qui changent de nom à chaque
+rollout, une liste écrite à la main serait fausse en permanence. Il interroge
+l'api-server et ne garde que les pods portant `prometheus.io/scrape: "true"` —
+d'où un `ServiceAccount` et un `ClusterRole` en lecture seule, dont il n'avait
+aucun besoin hier. Trois cibles découvertes sans qu'aucune adresse soit écrite
+nulle part.
+
+**Une troisième alerte est apparue, et c'est elle qui compte.** Les deux du
+jour 3 restent muettes sur les cinq pannes du jour 4, à juste titre : aucune ne
+coupe le service. Vérifié en rejouant la panne 3, le tag d'image inexistant :
+
+| | Ce que ça affichait |
+| --- | --- |
+| `curl /api/tasks` | **`200`**, pendant les huit minutes |
+| Alerte « plus aucune copie » | `inactive` |
+| Alerte « plus de 5 % d'erreurs » | `inactive` |
+| **Alerte « une copie ne répond pas »** | **`firing`** |
+
+Sans elle, personne ne se plaint et personne ne regarde. C'est le seul dispositif
+qui découvre une panne invisible.
+
+**Et une leçon rencontrée une seconde fois.** Une quatrième alerte ajoutée au
+fichier n'apparaissait pas dans Grafana : le ConfigMap était bien à jour, mais
+Grafana ne lit son provisioning **qu'au démarrage**. Exactement le cas limite de
+la phase 2 — un ConfigMap modifié ne pousse rien vers un pod déjà vivant.
+`appliquer.sh` relance donc Grafana après avoir mis ses ConfigMaps à jour.
+
+### 2. `/health` repensé — sans tomber dans le piège
+
+La limite mesurée en phase 7 : base coupée, les trois pods restent `READY 1/1`.
+La correction évidente serait de brancher les sondes sur un `/health` qui
+interroge Postgres. **Ce serait pire que le mal** : trois copies sondées toutes
+les 5 secondes, une base qui ralentit un peu, et les trois sondes échouent
+ensemble. Le Service perd tous ses endpoints. Une base **lente** devient une
+application **totalement indisponible**.
+
+D'où un partage plutôt qu'un remplacement :
+
+| | Question posée | Qui l'écoute | Effet si la réponse est mauvaise |
+| --- | --- | --- | --- |
+| `/health` | le serveur HTTP écoute-t-il ? | les deux sondes du pod | le pod est retiré du Service, ou redémarré |
+| `/ready` | la base répond-elle aussi ? | un humain, un `curl` | **aucun automatisme** |
+| `todo_db_up` | la même chose, en métrique | Prometheus, puis l'alerte | un humain est réveillé |
+
+Personne ne coupe le service à la place de l'humain. Et ni l'endpoint ni la
+métrique n'interrogent Postgres à l'appel : une minuterie le fait toutes les
+10 secondes et met le résultat en cache. Le coût ne dépend donc ni du nombre de
+sondes, ni du nombre de scrapes — c'est ce qui permet aux trois tests de
+`/ready` de tenir dans la suite **unitaire**, sans base, dont celui qui
+documente le choix en vérifiant que `/health` ment toujours.
+
+**48 tests** au total : 25 unitaires, 23 d'intégration.
+
+### 3. La sauvegarde — et la première restauration, qui a échoué
+
+Un `CronJob` toutes les six heures, `pg_dump` gzippé sur une PVC **distincte** de
+celle des données, rotation sur les douze derniers. Le fichier s'appelle
+`.partiel` jusqu'à la dernière seconde puis se renomme : un dump interrompu
+laisse un `.partiel` visible, jamais un `.sql.gz` tronqué qu'on croirait bon le
+jour où il sert.
+
+**Le CronJob a écrit des dumps valides que rien ne pouvait restaurer.** Première
+tentative de restauration :
+
+```
+ERROR:  relation "tasks" already exists
+```
+
+Sans `--clean --if-exists`, un `pg_dump` ne contient que des `CREATE TABLE`. Le
+rejouer sur une base dont la table existe encore — c'est-à-dire **précisément le
+cas où on restaure**, une table vidée par erreur — s'arrête là. La sauvegarde
+existait, elle était valide, et elle ne servait à rien.
+
+Corrigé, dump refait, et la manœuvre jouée en entier : tâche témoin créée, dump,
+tâche supplémentaire créée, `TRUNCATE TABLE`, restauration. Résultat : la tâche
+témoin est revenue, celle créée après le dump a bien disparu.
+
+**Une sauvegarde jamais restaurée n'est pas une sauvegarde.** C'est la seule
+ligne de cette section qui mérite d'être retenue.
+
+### Ce qui n'a pas pu être corrigé
+
+Le **runner self-hosted tourne toujours dans un `nohup`**. `svc.sh install`
+demande les droits root, dont ce compte ne dispose pas. La limite reste écrite
+au § 7 de la procédure, avec la commande de relance.
+
+---
+
 ## Ce qui reste ouvert
 
 ### Refermé au jour 3
@@ -1636,21 +1747,27 @@ du jour 3 avait montré, faute justement de limite.
 - ~~**Une seule copie pour encaisser le trafic.**~~ Trois, et la preuve qu'elles
   se le partagent vraiment : 55, 55 et 56 requêtes sur 166.
 
+### Refermé après coup, le même jour
+
+- ~~**Plus aucune surveillance.**~~ Prometheus et Grafana tournent dans le
+  cluster. Prometheus ne nomme plus ses cibles : il les découvre par annotation,
+  parce qu'une liste écrite à la main serait fausse à chaque rollout.
+- ~~**Aucune alerte ne préviendrait d'un pod bloqué.**~~ Vérifié en rejouant la
+  panne 3 : l'alerte est passée `firing` pendant que `curl` répondait `200`.
+- ~~**`/health` ne sait pas si la base répond.**~~ `/ready` le sait, et la jauge
+  `todo_db_up` le dit à Grafana. `/health` n'a **pas** bougé, exprès.
+- ~~**Aucune sauvegarde de la base.**~~ Un `CronJob` toutes les six heures, et
+  une restauration jouée pour de vrai — dont la première tentative a échoué.
+
 ### Toujours ouvert
 
-- **Aucune sauvegarde de la base.** La PVC `todo-db-data` est la seule copie des
-  données, et elle vit sur le disque du nœud k3d : détruire le cluster détruit
-  les données. C'est le premier manque à combler pour un vrai service, et il est
-  écrit noir sur blanc au § 7 de la procédure de déploiement.
-- **Plus aucune surveillance.** Le Prometheus et le Grafana du jour 3 tournent
-  dans `vm-prod`, qui est arrêtée, et ne scrutent rien du cluster. C'est une
-  **régression** par rapport à hier, et elle est d'autant plus grave que les
-  cinq pannes du jour 4 ne coupent pas le service : sans alerte, un pod bloqué
-  en `ImagePullBackOff` peut rester là des jours sans que personne s'en aperçoive.
-- **`/health` ne sait pas si la base répond.** Les deux sondes sont bâties
-  dessus et mentent donc de la même façon : base coupée, les trois pods restent
-  `READY 1/1`. Documenté plutôt que corrigé — un `/health` qui interrogerait
-  Postgres à chaque appel ferait tuer les trois pods au premier ralentissement.
+- **Les sauvegardes ne quittent pas la machine qu'elles protègent.** La PVC des
+  dumps vit sur le même disque que celle des données. Elle couvre la table vidée
+  par erreur — vérifié — pas la perte du nœud. C'est le manque restant, et le
+  premier à combler pour un vrai service.
+- **Pas de restauration à une date précise.** Le CronJob tourne toutes les six
+  heures : au pire, six heures de saisie sont perdues. Réduire cette fenêtre
+  demande l'archivage des WAL, un autre sujet.
 - **Le runner self-hosted tourne dans un `nohup`**, pas en service système. Un
   redémarrage du serveur, et les jobs restent `Queued` indéfiniment, sans
   message d'erreur — et ça n'est pas théorique, c'est arrivé une fois dans la

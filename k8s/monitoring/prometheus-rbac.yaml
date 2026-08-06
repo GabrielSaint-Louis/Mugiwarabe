@@ -1,0 +1,40 @@
+# Le droit de regarder, et rien d'autre.
+#
+# Le Prometheus du jour 3 n'avait besoin d'aucune permission : sa liste de
+# cibles etait ecrite en dur dans son fichier de configuration. Celui-ci
+# decouvre ses cibles en interrogeant l'api-server, et l'api-server ne repond a
+# personne sans identite ni droits.
+#
+# Ce que ces trois objets accordent, precisement : lire les pods et les
+# services, dans tout le cluster, en lecture seule. Aucun droit d'ecriture,
+# aucun acces aux Secrets. Un Prometheus compromis ne peut rien casser.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: todo
+---
+# ClusterRole et pas Role : la decouverte de pods interroge des ressources a
+# l'echelle du cluster. Le jour ou une deuxieme application vivra dans un autre
+# namespace, rien ne sera a changer ici.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: prometheus-lecture
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "services", "endpoints", "pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus-lecture
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: prometheus-lecture
+subjects:
+  - kind: ServiceAccount
+    name: prometheus
+    namespace: todo
