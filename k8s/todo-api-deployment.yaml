@@ -11,6 +11,17 @@ spec:
   # avec lui. Le Service n'a pas eu a changer d'un caractere : son selector
   # retrouve les nouveaux pods par leur etiquette, pas par leur nom.
   replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # maxUnavailable: 0 est LA ligne qui supprime la coupure d'hier : aucun
+      # ancien pod ne part avant qu'un nouveau soit Ready au sens de la
+      # readinessProbe. La capacite de service ne descend jamais sous 3.
+      maxUnavailable: 0
+      # Le prix a payer : une copie de plus le temps de la transition, donc
+      # 4 pods au pic au lieu de 3. maxSurge: 0 avec maxUnavailable: 0 serait
+      # refuse — les deux a zero interdisent tout mouvement.
+      maxSurge: 1
   selector:
     matchLabels:
       app: todo-api
@@ -21,6 +32,9 @@ spec:
         # aucun des deux ne connait le nom des pods, qui change a chaque rollout.
         app: todo-api
     spec:
+      # 30s, largement au-dessus des 5s du preStop plus le temps de fermeture
+      # du serveur : le pod n'est jamais SIGKILL avant d'avoir fini de servir.
+      terminationGracePeriodSeconds: 30
       containers:
         - name: todo-api
           # Le tag est un sha de commit, jamais `latest` : c'est la meme regle
@@ -51,6 +65,24 @@ spec:
           # base a chaque appel ferait echouer les trois sondes en meme temps
           # au premier ralentissement de Postgres, et transformerait une base
           # lente en trois pods tues.
+          # Ajoute APRES la premiere mesure de la phase 8, qui a compte 4
+          # requetes perdues sur 311 malgre maxUnavailable: 0.
+          #
+          # La cause n'est pas le rolling update, elle est plus subtile :
+          # Kubernetes envoie SIGTERM au pod AU MEME MOMENT qu'il retire son
+          # endpoint du Service. Le code ferme alors son serveur tout de suite
+          # (src/server.js), pendant que Traefik, lui, n'a pas encore appris
+          # que ce pod ne doit plus recevoir de trafic. Les requetes envoyees
+          # dans cet intervalle tombent sur un port ferme : code 502, ou 000
+          # quand la connexion est coupee en cours.
+          #
+          # preStop retarde le SIGTERM de 5 secondes. Le pod continue de servir
+          # normalement pendant que la nouvelle du retrait se propage. Aucune
+          # ligne de code applicatif n'a eu a changer.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "5"]
           readinessProbe:
             httpGet:
               path: /health
