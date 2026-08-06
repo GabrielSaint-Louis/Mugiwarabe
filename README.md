@@ -1457,6 +1457,66 @@ chiffres, et le second est le seul honnête :
 
 ---
 
+## Jour 4, phase 10 — cinq pannes, et ce que le cluster ne répare pas
+
+Les cinq pannes de `k8s/chaos.sh`, jouées une par une sur `todo-cluster`, avec
+la signature relevée à chaque fois dans `kubectl get pods` puis dans
+`kubectl describe`. Le tableau complet est repris tel quel au § 7 de
+`docs/PROCEDURE_DEPLOIEMENT.md` — c'est là qu'il sert, pas ici.
+
+| Panne | `kubectl get pods` | `describe` / events | Se répare seule ? | Remède |
+| --- | --- | --- | --- | --- |
+| **1. Pod supprimé** | un nom de pod disparaît, un nouveau apparaît en `Running` dans la seconde | `SuccessfulCreate` sur le ReplicaSet, image `already present on machine` | **Oui**, ~14 s jusqu'à `1/1` | aucun |
+| **2. Processus tué (`kill 1`)** | même nom de pod, `RESTARTS` passe à 1 | `Last State: Terminated`, `Reason: Completed`, `Exit Code: 0` | **Oui**, ~13 s | aucun |
+| **3. Tag d'image inexistant** | 3 pods sains + 1 bloqué en `ErrImagePull` puis `ImagePullBackOff` | `Failed to pull image … not found`, `Back-off pulling image` | **Non** | `kubectl rollout undo deployment/todo-api -n todo` |
+| **4. Clé du Secret supprimée** | 3 pods sains + 1 en `CrashLoopBackOff`, `RESTARTS` qui grimpe | `Exit Code: 1`, et dans les logs : `Variable d'environnement obligatoire manquante : DB_PASSWORD` | **Non** | `kubectl apply -f k8s/todo-secret.yaml` puis `kubectl rollout restart deployment/todo-api -n todo` |
+| **5. Limite mémoire à 8Mi** | 3 pods sains + 1 en `OOMKilled` / `CrashLoopBackOff` | `Last State: Terminated`, `Reason: OOMKilled`, `Exit Code: 137`, **logs vides** | **Non** | `kubectl patch deployment todo-api -n todo --type=json -p='[{"op":"remove","path":"/spec/template/spec/containers/0/resources"}]'` |
+
+Deux se réparent seules, trois attendent une main humaine : exactement la
+frontière annoncée le matin. Ce qui la trace n'est pas la gravité de la panne,
+c'est sa **nature**. Les deux premières sont des écarts entre l'état voulu et
+l'état réel, et la boucle de réconciliation sait les refermer. Les trois autres
+sont des états voulus **impossibles** : le cluster fait exactement ce qu'on lui
+a demandé, il essaie, il échoue, et il continuera d'essayer aussi longtemps que
+le texte dira une chose irréalisable.
+
+### Trois choses apprises en les jouant, qu'aucune ne disait à l'avance
+
+**Aucune des cinq n'a coupé le service.** `curl` sur `/api/tasks` répondait `200`
+pendant les cinq, y compris les trois qui ne se réparent pas. `maxUnavailable: 0`
+protège les trois pods sains : le pod fautif reste en attente sans jamais
+remplacer personne. C'est confortable et c'est un piège — une panne 3 non
+détectée reste en place indéfiniment, personne ne se plaignant de rien. Un
+`kubectl get pods` régulier ou une alerte sur `kube_deployment_status_replicas_unavailable`
+est la seule chose qui la découvre.
+
+**La panne 5 est la seule qui ne dit rien dans les logs.** `kubectl logs` sur le
+pod `OOMKilled` renvoie du vide : le processus est tué par le noyau avant
+d'écrire quoi que ce soit. La cause n'existe **que** dans `describe`, ligne
+`Last State`. Chercher dans les logs sur cette panne-là, c'est chercher là où
+rien n'a jamais été écrit.
+
+**Le remède évident de la panne 5 ne marche pas.** `kubectl apply -f` sur le
+manifeste versionné — le réflexe légitime, celui qui répare la panne 4 — laisse
+la limite de 8Mi en place. Vérifié deux fois :
+
+| Tentative | `resources` après |
+| --- | --- |
+| `kubectl apply -f k8s/todo-api-deployment.yaml` | `{"limits":{"memory":"8Mi"}}` |
+| `kubectl apply --server-side --force-conflicts -f …` | `{"limits":{"memory":"8Mi"}}` |
+| `kubectl patch … --type=json -p '[{"op":"remove",…}]'` | `{}` ✅ |
+
+La raison : `apply` ne supprime que les champs qu'il a lui-même posés
+auparavant. Un champ ajouté par `kubectl patch` appartient à un autre
+propriétaire, et un manifeste qui n'en parle pas ne le retire pas — il ne le
+mentionne simplement pas. C'est le pendant exact du *drift* décrit le matin, vu
+depuis l'autre bout : non seulement une modification à la main ne se voit pas
+dans le fichier versionné, mais **réappliquer le fichier ne l'efface pas**. La
+seule discipline qui protège de ça reste celle du matin : ne jamais modifier un
+cluster autrement que par le fichier versionné.
+
+---
+
 ## Ce qui reste ouvert
 
 ### Refermé au jour 3
