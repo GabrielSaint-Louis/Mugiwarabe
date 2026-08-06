@@ -1,0 +1,29 @@
+# L'etat voulu de l'API, ecrit une fois, maintenu en continu par le cluster.
+# Ce fichier remplace les trois `docker stop/rm/run` du jour 3 : ceux-la
+# s'executaient une fois, celui-ci reste vrai apres coup.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: todo-api
+  namespace: todo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: todo-api
+  template:
+    metadata:
+      labels:
+        # Cette etiquette est le seul lien entre le Deployment et le Service :
+        # aucun des deux ne connait le nom des pods, qui change a chaque rollout.
+        app: todo-api
+    spec:
+      containers:
+        - name: todo-api
+          # Le tag est un sha de commit, jamais `latest` : c'est la meme regle
+          # qu'au jour 3, et c'est ce qui rend `rollout undo` capable de nommer
+          # exactement la version d'avant. La pipeline (phase 5) remplace cette
+          # ligne par `kubectl set image` a chaque push sur main.
+          image: ghcr.io/gabrielsaint-louis/todo-api:f692c37b8de454fa688576db5f0b21c69cf26f06
+          ports:
+            - containerPort: 3000
