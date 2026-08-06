@@ -149,7 +149,8 @@ tp-devops-todo-api/
 │    ├── prometheus.yml
 │    ├── grafana/                 # source de données et tableau de bord, en fichiers
 │    ├── env.example              # modèle du .env posé à la main sur la cible
-│    └── deploy_key.pub           # la privée n'est PAS ici, et ne le sera jamais
+│    ├── deploy_key.pub           # la privée n'est PAS ici, et ne le sera jamais
+│    └── systemd/                 # J4 : le drop-in du runner, et pourquoi c'en est un
 ├── k8s/                          # J4 — l'état voulu du cluster
 │    ├── todo-api-deployment.yaml # 3 replicas, sondes, preStop, ressources
 │    ├── todo-api-service.yaml    # l'adresse stable devant des pods qui ne le sont pas
@@ -1619,7 +1620,7 @@ du jour 3 avait montré, faute justement de limite.
 
 ---
 
-## Jour 4, après coup — les trois manques refermés
+## Jour 4, après coup — les quatre manques refermés
 
 Le jour 4 fermait quatre limites du jour 3 et en ouvrait une nouvelle. Voici ce
 qui a été fait des unes et de l'autre.
@@ -1726,11 +1727,56 @@ témoin est revenue, celle créée après le dump a bien disparu.
 **Une sauvegarde jamais restaurée n'est pas une sauvegarde.** C'est la seule
 ligne de cette section qui mérite d'être retenue.
 
-### Ce qui n'a pas pu être corrigé
+### 4. Le runner, enfin un service
 
-Le **runner self-hosted tourne toujours dans un `nohup`**. `svc.sh install`
-demande les droits root, dont ce compte ne dispose pas. La limite reste écrite
-au § 7 de la procédure, avec la commande de relance.
+Ouvert depuis le jour 3, et pour une raison prosaïque : `svc.sh install` demande
+les droits root. Une fois le `sudo` obtenu, l'installation tient en une
+commande — et **l'unité générée est plus faible qu'elle n'en a l'air**.
+
+| Ce que l'unité générée contient | Ce qui manquait |
+| --- | --- |
+| `WantedBy=multi-user.target` | rien : le redémarrage de la machine est bien couvert |
+| `After=network-online.target` | **le `Wants=` qui va avec.** Un `After=` seul n'active pas la cible : sans `Wants=`, `network-online` n'est pas tirée dans la transaction de démarrage, et l'ordonnancement ne s'applique à rien |
+| — | **aucun `Restart=`.** `enable` couvre le reboot, pas le plantage. Un runner mort restait mort |
+| — | **aucun ordering sur Docker.** Le runner ne fait plus de SSH depuis le jour 4 : il parle à un cluster qui vit dans Docker. Démarrer avant lui donnerait, au reboot, un runner qui accepte des jobs qu'il ne peut pas exécuter |
+
+Les trois manques sont réparés par un drop-in plutôt que par une édition de
+l'unité : un `svc.sh uninstall && svc.sh install` la réécrit entièrement, et les
+corrections disparaîtraient en silence.
+
+**Éprouvé, pas supposé.** `kill -9` sur le listener, aucune commande tapée
+ensuite : le process est revenu vingt-cinq secondes plus tard avec un PID neuf,
+et le service est resté `active`. Puis un vrai job, qui affiche depuis
+l'intérieur :
+
+```
+lance par systemd (INVOCATION_ID pose)
+todo-api-5d6f96b4d8-fwvn4   1/1     Running   0          22m
+```
+
+`INVOCATION_ID` est posé par systemd sur tout process qu'il lance. Un runner
+démarré à la main en `nohup` ne l'a pas. La différence se lit donc là où elle
+compte : dans un job.
+
+### Ce que l'opération a cassé au passage
+
+**Deux choses, et aucune n'était prévisible.**
+
+Un job est resté **`Queued` pendant dix minutes** alors que le runner était
+`active` côté machine **et** `online` côté GitHub. Il avait été assigné à la
+session que le redémarrage du service venait de tuer ; le journal disait
+`A session for this runner already exists`, puis `Runner reconnected` trois
+minutes plus tard — mais le job déjà assigné ne repartait pas pour autant.
+Redémarrer le runner une deuxième fois, le réflexe évident, n'y change rien. Un
+*Re-run* le débloque. C'est au § 7 de la procédure.
+
+Et `runner-check.yml`, le workflow du jour 3 qui prouve *où* tourne un job,
+**rougissait depuis le passage au cluster** : ses deux jobs testaient
+`nc -z 127.0.0.1 2222`, le port SSH de `vm-prod`, arrêtée depuis la phase 1.
+Il échouait donc pour une raison sans aucun rapport avec ce qu'il mesure — le
+pire genre d'échec, celui qui apprend à ignorer un job rouge. La question posée
+n'a pas changé, sa cible si : le job self-hosted liste les pods, celui de GitHub
+constate qu'il n'a aucun chemin vers eux, et c'est le résultat attendu.
 
 ---
 
@@ -1774,6 +1820,8 @@ au § 7 de la procédure, avec la commande de relance.
   `todo_db_up` le dit à Grafana. `/health` n'a **pas** bougé, exprès.
 - ~~**Aucune sauvegarde de la base.**~~ Un `CronJob` toutes les six heures, et
   une restauration jouée pour de vrai — dont la première tentative a échoué.
+- ~~**Le runner self-hosted tourne dans un `nohup`.**~~ Service systemd, `enabled`
+  et `Restart=always`. Éprouvé au `kill -9` : revenu seul, PID neuf.
 
 ### Toujours ouvert
 
@@ -1784,11 +1832,6 @@ au § 7 de la procédure, avec la commande de relance.
 - **Pas de restauration à une date précise.** Le CronJob tourne toutes les six
   heures : au pire, six heures de saisie sont perdues. Réduire cette fenêtre
   demande l'archivage des WAL, un autre sujet.
-- **Le runner self-hosted tourne dans un `nohup`**, pas en service système. Un
-  redémarrage du serveur, et les jobs restent `Queued` indéfiniment, sans
-  message d'erreur — et ça n'est pas théorique, c'est arrivé une fois dans la
-  journée sans même un redémarrage. `svc.sh install` (qui demande les droits
-  root) serait la vraie réponse.
 - **La passation de la phase 10 a été jouée seul**, les deux rôles tenus par la
   même personne. La procédure n'a donc jamais été confrontée à quelqu'un qui ne
   l'avait pas écrite — le seul test qui la valide vraiment.

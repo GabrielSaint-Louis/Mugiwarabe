@@ -71,6 +71,8 @@ depuis Internet :
 > ce qui n'a rien à voir avec une panne de l'API. Un 404 sur `/health` est
 > presque toujours une erreur de `Host`, pas une application morte.
 
+| Runner | service systemd `actions.runner.…vm-prod-host.service` | `systemctl is-active` ; § 7 s'il est mort |
+
 Les deux commandes à taper en premier, toujours, avant même de savoir ce qui se
 passe :
 
@@ -624,10 +626,25 @@ Cette procédure ne prévoit pas :
   Trouver le coupable avec `ss -ltnp | grep 8080` ; sur cette machine c'est
   presque toujours la stack `docker compose` du jour 1
   (`docker stop todo-todo-api-1`).
-- **le runner self-hosted arrêté.** Les jobs restent `Queued` indéfiniment, sans
-  message d'erreur. Vérifier avec
-  `pgrep -af 'actions-runner.*Runner.Listener'`, relancer avec
-  `cd ~/actions-runner && nohup ./run.sh > runner.log 2>&1 &`.
+- **le runner self-hosted arrêté.** Depuis le 6 août 2026, il est un service
+  systemd : il redémarre avec la machine et se relance tout seul s'il meurt.
+  Il reste néanmoins le premier suspect quand des jobs restent `Queued` :
+
+  ```bash
+  SVC=actions.runner.GabrielSaint-Louis-tp-devops-todo-api.vm-prod-host.service
+  systemctl is-active "$SVC"          # attendu : active
+  systemctl is-enabled "$SVC"         # attendu : enabled
+  sudo systemctl restart "$SVC"       # si besoin
+  sudo journalctl -u "$SVC" -n 30     # ce qu'il dit
+  ```
+
+  > **Un job qui reste `Queued` alors que le runner est `active` et `online`.**
+  > Vu le 6 août 2026, dix minutes durant. Le job avait été assigné à une
+  > session que le redémarrage du service venait de tuer, et GitHub l'attendait
+  > toujours. Le journal disait `A session for this runner already exists` puis,
+  > trois minutes plus tard, `Runner reconnected` — mais le job déjà assigné,
+  > lui, ne repartait pas. **Le relancer (*Re-run jobs*) le débloque ;
+  > redémarrer encore le runner ne sert à rien.**
 - **`kubectl` absent du PATH du runner.** Le job de déploiement le vérifie en
   première étape et le dit explicitement — mais il ne l'installe pas.
 
@@ -694,3 +711,5 @@ d'un moment où quelqu'un s'est trouvé bloqué devant ce document.
 | **2026-08-06, après avoir remonté la surveillance** | Le § 5 disait qu'il n'existait aucun tableau de bord ni aucune alerte sur le cluster, et le § 7 le listait comme le premier manque à combler. Les deux sont faux depuis que Prometheus et Grafana tournent dans le cluster. | § 5 réécrit avec les panneaux, les quatre alertes et leurs seuils. Et une alerte qui n'existait pas hier : « une copie ne répond pas », la seule chose qui découvre les pannes du § 6, puisqu'aucune ne coupe le service. |
 | **2026-08-06, après avoir ajouté `/ready`** | Le § 5 concluait « le seul test qui ne ment pas est une vraie requête métier ». C'était vrai, et insuffisant : un `GET /api/tasks` en erreur ne dit pas si le problème vient de la base ou du code. | `/ready` répond précisément à cette question, avec le message brut de `pg` dans son champ `detail`. `/health` n'a pas bougé, et le § 5 explique maintenant pourquoi c'est délibéré. |
 | **2026-08-06, en restaurant une sauvegarde pour la première fois** | Le CronJob écrivait des dumps valides depuis le début, et aucun ne se restaurait : sans `--clean --if-exists`, rejouer un dump sur une base dont la table existe encore s'arrête sur `relation "tasks" already exists`. C'est-à-dire précisément dans le cas où on restaure, une table vidée par erreur. | `--clean --if-exists` ajouté, dump refait, restauration jouée pour de vrai. Nouveau § 9, et la règle en tête : une sauvegarde jamais restaurée n'est pas une sauvegarde. |
+| **2026-08-06, en passant le runner en service systemd** | Le § 7 faisait relancer le runner par `nohup ./run.sh`, ce qui reproduisait exactement le défaut qu'on cherchait à corriger : un runner qui ne survit ni au redémarrage de la machine, ni à son propre plantage. | Le runner est un service (`svc.sh install` + un drop-in qui ajoute le `Restart=always` que l'unité générée n'a pas). Le § 7 donne les quatre commandes de diagnostic, `sudo` compris. |
+| **2026-08-06, dix minutes de job `Queued` sans explication** | Rien ne disait qu'un job peut rester `Queued` alors que le runner est `active` **et** `online` côté GitHub : il avait été assigné à la session tuée par le redémarrage du service. Redémarrer le runner une deuxième fois n'y change rien, et c'est pourtant le réflexe. | Encadré au § 7 : la signature (`A session for this runner already exists` dans le journal) et le vrai remède, *Re-run jobs*. |
