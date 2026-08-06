@@ -1517,6 +1517,58 @@ cluster autrement que par le fichier versionné.
 
 ---
 
+## Jour 4, phase 12 — jusqu'où serrer les ressources
+
+Hier, « aucune limite de ressources » figurait dans *Ce qui reste ouvert*. Voici
+les valeurs, et surtout comment elles ont été trouvées : en cassant, pas en
+devinant. Chaque palier a été appliqué, puis chargé pendant 25 secondes, avec
+trois relevés `kubectl top` pendant la charge (`scripts/serrer-memoire.sh`).
+
+| `limits.memory` | `kubectl top` sous charge | Verdict |
+| --- | --- | --- |
+| 128Mi | 14–16 Mi | tenu, 0 requête perdue |
+| 64Mi | 14–15 Mi | tenu, 0 requête perdue |
+| 48Mi | 15–16 Mi | tenu, 0 requête perdue |
+| 32Mi | 14–15 Mi | tenu, 0 requête perdue |
+| 24Mi | 15–16 Mi | tenu, 0 requête perdue |
+| **20Mi** | — | **`OOMKilled`, `Exit Code: 137`**, `RESTARTS` qui grimpe |
+
+Le plancher est donc entre 20Mi et 24Mi. Et 24Mi n'est pas seulement « le pod
+démarre » : un rolling update complet sous charge à cette valeur n'a fait tomber
+**aucune requête** (0 sur 382), la même preuve qu'en phase 8, cette fois avec des
+ressources serrées.
+
+**La valeur retenue n'est pourtant pas 24Mi.**
+
+```yaml
+resources:
+  requests: { memory: 24Mi, cpu: 50m }
+  limits:   { memory: 48Mi, cpu: 500m }
+```
+
+24Mi tient sous la charge **qu'on sait produire ici**. Vérification faite avec
+quatre générateurs en parallèle plutôt qu'un : 258 requêtes chacun, 1 032 en
+tout, 0 échec, et la mémoire n'a bougé que de 15–16 Mi à 16–17 Mi. Ce qui
+n'est pas rassurant mais instructif : **la charge n'est pas ce qui fait monter la
+mémoire de cette application**. Un corps de réponse plus gros que nos tâches, ou
+un pic de GC, déplacerait le plafond sans qu'aucune des mesures ci-dessus l'ait
+vu venir. 48Mi, soit trois fois le pic mesuré et le double du plancher trouvé,
+achète cette marge-là — et le chiffre qui la justifie est écrit, plutôt que
+l'intuition qui l'aurait produite.
+
+`requests.memory` colle au plancher (24Mi) et non à la limite : le `requests`
+est ce que le scheduler **réserve**, et réserver 48Mi par pod ferait refuser des
+pods qu'une machine aurait très bien pu accueillir.
+
+Pour le CPU, l'asymétrie mérite d'être notée : dépasser `limits.memory` **tue**
+le conteneur (`OOMKilled`), dépasser `limits.cpu` le **ralentit** seulement
+(*throttling*). 500m laisse dix fois le CPU observé en pointe (41 à 48 m sous
+charge) : assez large pour ne jamais brider une rafale légitime, assez ferme
+pour qu'un pod parti en boucle n'affame pas ses voisins — ce que la panne n° 5
+du jour 3 avait montré, faute justement de limite.
+
+---
+
 ## Ce qui reste ouvert
 
 ### Refermé au jour 3
