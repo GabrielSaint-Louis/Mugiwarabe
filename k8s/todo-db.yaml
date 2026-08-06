@@ -1,0 +1,81 @@
+# La base et son volume. Trois objets dans un seul fichier, separes par ---,
+# parce qu'ils n'ont aucun sens l'un sans les autres : le Deployment sans PVC
+# perd tout au premier redemarrage, la PVC sans Service n'est joignable par
+# personne.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: todo-db-data
+  namespace: todo
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  # Aucun storageClassName : k3d fournit local-path par defaut, qui provisionne
+  # le volume sur le disque du noeud sans qu'on ait rien a installer.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: todo-db
+  namespace: todo
+spec:
+  replicas: 1 # une base ne se duplique pas comme un service sans etat
+  selector:
+    matchLabels:
+      app: todo-db
+  template:
+    metadata:
+      labels:
+        app: todo-db
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          env:
+            # secretKeyRef et pas envFrom : l'image postgres attend ces trois
+            # noms-la exactement, POSTGRES_*, la ou l'API attend DB_*. Une seule
+            # source de verite, le Secret, deux facons de la lire.
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: todo-secret
+                  key: DB_NAME
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: todo-secret
+                  key: DB_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: todo-secret
+                  key: DB_PASSWORD
+          ports:
+            - containerPort: 5432
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+              # subPath evite un dossier "lost+found" que certains volumes
+              # deposent a la racine, et que Postgres refuse au demarrage
+              subPath: pgdata
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: todo-db-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: todo-db
+  namespace: todo
+spec:
+  # Le nom de ce Service est la valeur de DB_HOST dans todo-config. C'est le
+  # DNS interne qui fait le lien, aucune IP n'est ecrite nulle part.
+  selector:
+    app: todo-db
+  ports:
+    - port: 5432
+      targetPort: 5432
