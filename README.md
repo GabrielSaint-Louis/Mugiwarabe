@@ -1332,6 +1332,75 @@ fait une chose ne la rend pas juste — seul le fait de s'en servir le dit.
 
 ---
 
+## Jour 4, phase 8 — le rolling update, mesuré
+
+Le déploiement d'hier coupait le service « quelques secondes », écrit ainsi,
+sans chiffre. Voici le chiffre, et celui d'aujourd'hui en face. Même charge dans
+les deux cas (`scripts/charge-cluster.sh`, une requête toutes les 100 ms sur
+`/api/tasks`), même bascule d'une version publiée vers une autre.
+
+| Déploiement | Requêtes échouées | Secondes d'indisponibilité | Temps de convergence totale |
+| --- | --- | --- | --- |
+| Hier, `apply.sh` + `docker compose up -d` sur `vm-prod` | **11 / 306** | **~1,1 s**, d'un seul tenant | 1,7 s |
+| Aujourd'hui, rolling update sur le cluster | **0 / 382** | **0 s** | 21,8 s |
+
+Les deux colonnes de droite disent des choses opposées, et c'est le cœur de la
+journée. Le déploiement d'hier est **12 fois plus rapide** — 1,7 s contre 21,8 s
+— parce qu'il ne fait rien d'autre qu'arrêter un conteneur et en démarrer un
+autre. C'est exactement pour ça qu'il coupe : les onze requêtes perdues sont
+**consécutives** (requêtes 27 à 37 du relevé), un trou franc dans le service.
+Celles du cluster, quand il y en a, sont isolées. Vingt secondes de plus, c'est
+le prix des trois pods remplacés un par un, chacun attendu jusqu'à ce qu'il soit
+`Ready`.
+
+### `maxUnavailable: 0` n'est pas ce qui a supprimé la coupure
+
+Première mesure sur le cluster, avec `maxUnavailable: 0` et `maxSurge: 1` posés
+comme le TP le suggère : **4 requêtes perdues sur 311**. Pas zéro. Le réglage
+censé garantir qu'aucun pod ne parte avant qu'un autre soit prêt n'avait rien
+changé du tout.
+
+La cause était ailleurs. Kubernetes envoie `SIGTERM` au pod **au moment même** où
+il retire son endpoint du Service. `src/server.js` ferme alors son serveur tout
+de suite — un comportement écrit au jour 2 et correct par ailleurs — pendant que
+Traefik, lui, n'a pas encore appris que ce pod ne doit plus recevoir de trafic.
+Les requêtes envoyées dans cet intervalle tombent sur un port fermé : `502`, ou
+`000` quand la connexion est coupée en cours de route.
+
+Le correctif tient en quatre lignes de manifeste, un `preStop` qui dort cinq
+secondes avant le `SIGTERM`, et **aucune ligne de code applicatif**. Les quatre
+combinaisons, mesurées séparément pour ne pas se raconter d'histoires :
+
+| `maxUnavailable` | `preStop` | Requêtes échouées |
+| --- | --- | --- |
+| 25 % (défaut) | absent | 3 / 305 |
+| **0** | absent | 4 / 302 |
+| 25 % (défaut) | `sleep 5` | **0 / 382** |
+| **0** | `sleep 5` | **0 / 382** |
+
+Lecture directe du tableau : le réglage qu'on retient de la journée n'est pas
+celui qui fait le travail. `maxUnavailable: 0` ne bouge pas le compteur ; le
+`preStop` l'annule, avec ou sans lui. Les deux sont gardés dans le manifeste
+versionné — le premier parce qu'il protège la capacité de service pendant le
+rollout, ce qui est une autre garantie, mais il fallait le mesurer pour ne pas
+lui attribuer un mérite qui n'est pas le sien.
+
+### Trois vérifications, dont une qui a d'abord menti
+
+- **Reproductibilité** : deux rollouts successifs dans la configuration finale,
+  0 échec sur 387 puis 0 sur 382.
+- **Contre-épreuve** : `preStop` retiré, le compteur remonte à 3 et 4 échecs
+  selon les passages. Le réglage sert bien à quelque chose.
+- **Le protocole lui-même a dû être corrigé.** La première version de
+  `scripts/mesure-rollout.sh` démarrait la charge pendant que les pods du
+  rollout *précédent* finissaient de mourir, et comptait leurs échecs au débit
+  du rollout mesuré — 3 requêtes perdues attribuées à la mauvaise cause. Le
+  script attend maintenant que le cluster soit au repos (autant de pods vivants
+  que voulus, tous prêts, aucun en trop) avant la première requête. Un
+  instrument de mesure se vérifie avant ce qu'il mesure.
+
+---
+
 ## Ce qui reste ouvert
 
 ### Refermé au jour 3
