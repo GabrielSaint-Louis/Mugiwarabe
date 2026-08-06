@@ -7,7 +7,10 @@ metadata:
   name: todo-api
   namespace: todo
 spec:
-  replicas: 1
+  # Trois copies, pas une. Une seule encaissait tout le trafic seule et tombait
+  # avec lui. Le Service n'a pas eu a changer d'un caractere : son selector
+  # retrouve les nouveaux pods par leur etiquette, pas par leur nom.
+  replicas: 3
   selector:
     matchLabels:
       app: todo-api
