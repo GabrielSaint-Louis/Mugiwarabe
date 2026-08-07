@@ -19,6 +19,20 @@ CREATE TABLE IF NOT EXISTS question (
   creee_le      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Les doublons de texte accumules AVANT que la contrainte n'existe.
+--
+-- Cette ligne a ete ajoutee apres un vrai echec en production. La contrainte
+-- d'unicite ci-dessous a ete ecrite alors que la base tournait deja avec douze
+-- doublons dedans, laisses par la vigie. L'index a refuse d'etre cree, et comme
+-- tout ce fichier part en une seule requete, la transaction a ete annulee :
+-- AUCUNE table n'a ete creee, pas seulement l'index.
+--
+-- Le service qui en dependait s'est declare degrade sans que rien n'explique
+-- pourquoi. La lecon vaut au-dela d'aujourd'hui : une contrainte ajoutee apres
+-- coup doit toujours etre precedee du menage qui la rend possible.
+DELETE FROM question a USING question b
+ WHERE a.id > b.id AND lower(a.texte) = lower(b.texte);
+
 -- Le meme texte ne doit pas entrer deux fois. La vigie fabrique en boucle, et
 -- un modele qui tourne sur le meme sujet finit toujours par se repeter : sans
 -- cette contrainte, un joueur reverrait la meme question dans la meme serie.

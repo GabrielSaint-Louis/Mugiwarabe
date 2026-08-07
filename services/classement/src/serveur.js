@@ -25,6 +25,7 @@ const pool = new pg.Pool({
 });
 
 let baseVivante = false;
+let premierEchecJournalise = false;
 
 // Le meme piege que celui trouve sur l'API, et il tue aussi surement ici : sans
 // cette ligne, arreter la base ferait sortir le process en code 1 au lieu de le
@@ -83,7 +84,17 @@ async function recalculer() {
     calculeLe = new Date().toISOString();
     baseVivante = true;
   } catch (erreur) {
-    if (baseVivante) console.error('[classement] recalcul impossible :', erreur.message);
+    // On journalise le PREMIER echec aussi, et pas seulement les suivants.
+    //
+    // La condition etait `if (baseVivante)`, pour ne pas repeter le message a
+    // chaque tentative. Elle avait un effet de bord qu'on a paye en production :
+    // au demarrage baseVivante vaut false, donc la toute premiere erreur, celle
+    // qui dit pourquoi le service n'a jamais reussi a demarrer, n'etait jamais
+    // affichee. Le service se declarait degrade en silence.
+    if (baseVivante || !premierEchecJournalise) {
+      console.error('[classement] recalcul impossible :', erreur.message);
+      premierEchecJournalise = true;
+    }
     baseVivante = false;
   }
   mesure.dependance.set({ dependance: 'base' }, baseVivante ? 1 : 0);
