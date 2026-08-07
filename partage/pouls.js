@@ -6,10 +6,15 @@
 // expose reellement.
 //
 //   le sujet dit    POST /api/pouls        le tableau repond 404
-//   le tableau veut POST /api/battement    et il repond 200
+//   le tableau voulait POST /api/battement  puis, le 7 aout a 12h50, /api/pulse
 //
 //   le sujet lit    ordre.prochain_pouls_ms
-//   le tableau rend ordre.prochain_battement_ms
+//   le tableau rend ordre.prochain_pulse_ms, apres prochain_battement_ms
+//
+// Le tableau a renomme sa route en cours de journee. Les trois noms sont donc
+// lus dans l'ordre du plus recent au plus ancien : si le chemin change encore,
+// seule la constante CHEMIN est a reprendre, et la cadence continue d'etre lue
+// quel que soit le nom du champ.
 //
 // Trouve en interrogeant le tableau : /api/pouls renvoyait une page d'erreur
 // HTML, que le pouls essayait de lire en JSON, d'ou le message
@@ -28,7 +33,7 @@ const SERVICE = process.env.SERVICE;
 const VERSION = process.env.VERSION || "dev";
 const PAVILLON = process.env.PAVILLON_FICHIER || "/data/pavillon.txt";
 const MOI = process.env.URL_INTERNE || "http://localhost:3000";
-const CHEMIN = process.env.TABLEAU_CHEMIN || "/api/battement";
+const CHEMIN = process.env.TABLEAU_CHEMIN || "/api/pulse";
 
 let totalEncaisse = 0; // depuis le demarrage de ce process, affiche sur le carre
 let aDeclarer = 0; // encaisses depuis le dernier pouls, ce que le tableau attend
@@ -87,7 +92,11 @@ async function envoyerPouls() {
         // au courant : si l'appel echoue, ils repartiront dans le pouls suivant.
         aDeclarer -= declares;
         const ordre = await reponse.json();
-        attente = ordre.prochain_battement_ms || ordre.prochain_pouls_ms || 5000;
+        attente =
+            ordre.prochain_pulse_ms ||
+            ordre.prochain_battement_ms ||
+            ordre.prochain_pouls_ms ||
+            5000;
         if (ordre.coups_a_encaisser > 0) await encaisser(ordre.coups_a_encaisser);
     } catch (erreur) {
         console.error("[pouls] tableau injoignable :", erreur.message);

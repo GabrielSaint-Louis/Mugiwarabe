@@ -291,3 +291,44 @@ palier 4, et lui ajouter une ecriture a chaque hissage de pavillon n'aide pas.
 **Ce qu'on assume** : l'API subit une interruption courte pendant une livraison,
 les trois autres non. Le front, celui que la classe regarde, est du bon cote.
 C'est une limite connue, ecrite ici et dans le README, pas un oubli.
+### I-12. Le tableau a renomme sa route pendant qu'on preparait l'oral
+
+**Ce qu'on a fait** : rien. Les quatre carres se sont eteints tout seuls a 12h50.
+
+**Ce que les panneaux montraient** : tout vert. Cibles presentes, dependances
+repondantes, latence normale, les quatre pods `Running` depuis une heure et
+demie. Exactement la signature de la panne 6.
+
+**Ce que les logs disaient**, sur les quatre services a la fois :
+
+    [pouls] tableau injoignable : Unexpected token 'T', "The page c"... is not valid JSON
+
+**La cause** : le tableau a ete redeploye et sa route a change.
+
+| | Avant | Apres |
+|---|---|---|
+| la route | `POST /api/battement` | `POST /api/pulse` |
+| le champ de cadence | `prochain_battement_ms` | `prochain_pulse_ms` |
+
+`/api/battement` renvoie desormais le 404 HTML de Vercel, que le pouls lit en
+JSON. Le message accuse le reseau alors que le tableau repond parfaitement.
+C'est la deuxieme fois de la journee que le contrat bouge : ce matin deja, le
+`pouls.js` du sujet pointait sur `/api/pouls` quand le tableau ecoutait sur
+`/api/battement`.
+
+**Comment on a retrouve la nouvelle route** : `/api/etat` montrait un autre
+equipage a `vivants = 3` avec un silence de trois secondes. Donc le tableau
+recevait bien quelque chose, donc la route existait, donc c'est notre chemin qui
+etait faux. Vercel repond **405 sur une route qui existe mais refuse la
+methode** et **404 sur une route qui n'existe pas** : ca donne un oracle, et un
+balayage de noms a designe `/api/pulse` en quelques secondes.
+
+**La manoeuvre** : `TABLEAU_CHEMIN` dans la ConfigMap, puis un redemarrage des
+quatre deploiements. Carres pleins a nouveau, silence sous la seconde.
+
+**Ce qu'on en retient** : la reparation a chaud vivait dans le cluster et pas
+dans le depot, donc le premier qui aurait rejoue les manifestes aurait tout
+reeteint. Le pouls lit maintenant les **trois** noms de champ, du plus recent au
+plus ancien : si le contrat bouge une troisieme fois, seule la constante
+`CHEMIN` sera a reprendre, et la cadence continuera d'etre lue. On ne devine pas
+le prochain nom, on refuse juste de dependre de l'ancien.
