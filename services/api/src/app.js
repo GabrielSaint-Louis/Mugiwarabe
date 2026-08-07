@@ -1,14 +1,20 @@
 import express from 'express';
 import { config } from './config.js';
-import { register, mesurerRequetes, coupsEncaisses } from './metrics.js';
+import { creerMesure } from '../../../partage/mesure.js';
 import { etatBase, interrogerLaBase, pool } from './db.js';
 import { mancheCourante, ouvrirUneManche, repondre } from './quiz.js';
 import { lire as lirePavillon, hisser } from './pavillon.js';
 
+// Le registre de l'API vient du meme fabricant que celui des trois autres
+// services. Il avait son propre fichier avant que la mesure ne soit mise en
+// commun : deux registres auraient derive, et le panneau de latence aurait
+// compare des tranches d'histogramme differentes.
+export const mesure = creerMesure(config.service);
+
 export function creerApp() {
   const app = express();
   app.use(express.json({ limit: '16kb' }));
-  app.use(mesurerRequetes);
+  app.use(mesure.mesurerRequetes);
 
   // --- La sonde ------------------------------------------------------------
   //
@@ -20,6 +26,11 @@ export function creerApp() {
   // code de statut fait partie du diagnostic, autant qu'il soit juste.
   app.get('/sante', async (requete, reponse) => {
     const base = await interrogerLaBase();
+    // La sonde et la metrique disent la meme chose au meme moment. Les laisser
+    // se desynchroniser reviendrait a avoir un panneau vert pendant qu'un
+    // service repond 503, et c'est exactement le genre d'ecart qui fait perdre
+    // dix minutes en pleine demonstration.
+    mesure.dependance.set({ dependance: 'base' }, base ? 1 : 0);
     reponse.status(base ? 200 : 503).json({
       service: config.service,
       version: config.version,
@@ -41,7 +52,7 @@ export function creerApp() {
         FROM reponse r JOIN manche m ON m.id = r.manche_id
         WHERE m.fermee_le IS NULL
       `);
-      coupsEncaisses.inc();
+      mesure.coupsEncaisses.inc();
       reponse.json({ fait: true, ...rows[0] });
     } catch (erreur) {
       // 503 : le coup n'a pas ete encaisse. Repondre 200 ici gonflerait le
@@ -90,10 +101,7 @@ export function creerApp() {
     reponse.json({ pavillon: lirePavillon() });
   });
 
-  app.get('/metriques', async (requete, reponse) => {
-    reponse.set('Content-Type', register.contentType);
-    reponse.end(await register.metrics());
-  });
+  mesure.brancherLaRoute(app);
 
   // Le dernier filet. Sans lui, une promesse rejetee dans une route asynchrone
   // laisse la requete sans reponse : le client attend son timeout, et la

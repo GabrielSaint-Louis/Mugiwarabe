@@ -1,6 +1,6 @@
 import { config } from './config.js';
-import { creerApp } from './app.js';
-import { attendreLaBase, initialiserSchema, surveillerLaBase, pool } from './db.js';
+import { creerApp, mesure } from './app.js';
+import { attendreLaBase, initialiserSchema, surveillerLaBase, etatBase, pool } from './db.js';
 import { semerLaBanque } from './quiz.js';
 import { demarrerLePouls } from '../../../partage/pouls.js';
 
@@ -28,6 +28,10 @@ const serveur = app.listen(config.port, config.host, () => {
   }
   await initialiserSchema();
   await semerLaBanque();
+  // La minuterie de surveillance porte la metrique, pas seulement l'etat
+  // interne : sans ca, le panneau des dependances ne bougerait qu'au moment ou
+  // quelqu'un appelle /sante, donc jamais pendant qu'on regarde l'ecran.
+  setInterval(() => mesure.dependance.set({ dependance: 'base' }, etatBase() ? 1 : 0), 5000).unref();
   surveillerLaBase();
 })().catch((erreur) => {
   console.error('[api] preparation de la base impossible :', erreur.message);

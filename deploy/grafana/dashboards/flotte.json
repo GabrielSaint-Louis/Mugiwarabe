@@ -1,0 +1,252 @@
+{
+  "uid": "flotte-mugiwarabe",
+  "title": "Flotte Mugiwarabe",
+  "description": "Quatre panneaux, quatre questions. L'exercice n'est pas d'ajouter des panneaux, il est d'en avoir peu et de savoir ce que chacun elimine.",
+  "tags": ["mugiwarabe", "flotte"],
+  "timezone": "browser",
+  "editable": false,
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "templating": { "list": [] },
+  "annotations": { "list": [] },
+  "schemaVersion": 39,
+  "version": 1,
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "1. Est-ce que le service recoit du trafic ?",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Coups encaisses par service et par seconde",
+      "description": "Un carre eteint AVEC du trafic qui arrive ne raconte pas la meme histoire qu'un carre eteint avec une courbe a plat. Courbe a plat sur un seul service : la panne est chez lui. Courbe a plat partout : c'est le tableau qui ne nous parle plus, ou le feu qui n'est pas ouvert.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (service) (rate(coups_encaisses_total[1m]))",
+          "legendFormat": "{{service}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 12, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Requetes HTTP par service et par seconde",
+      "description": "Le trafic total, coups compris. Sert a distinguer une flotte que personne n'utilise d'une flotte qui recoit du monde mais ne repond pas.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (service) (rate(http_requests_total[1m]))",
+          "legendFormat": "{{service}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 12, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+
+    {
+      "id": 4,
+      "type": "row",
+      "title": "2. Est-ce qu'il repond, et en combien de temps ?",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 },
+      "collapsed": false
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Latence de /travail, p50 et p95",
+      "description": "La latence qui explose AVANT l'extinction designe la saturation. L'extinction SANS montee de latence designe autre chose : un process mort, une configuration incomplete, ou le tableau injoignable. C'est ce panneau qui tranche entre les deux familles de pannes. Un histogramme et pas une moyenne : quand un service sature, ce sont les requetes lentes qui se multiplient, et elles disparaissent dans une moyenne tiree vers le bas par toutes les rapides.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 10 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (service, le) (rate(http_request_duration_seconds_bucket{route=\"/travail\"}[1m])))",
+          "legendFormat": "p95 {{service}}"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.50, sum by (service, le) (rate(http_request_duration_seconds_bucket{route=\"/travail\"}[1m])))",
+          "legendFormat": "p50 {{service}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 0, "showPoints": "never" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 0.25 },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byRegexp", "options": "p50.*" },
+            "properties": [{ "id": "custom.lineStyle", "value": { "fill": "dash", "dash": [8, 4] } }]
+          }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "calcs": ["lastNotNull", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+
+    {
+      "id": 6,
+      "type": "row",
+      "title": "3. Est-ce que ses dependances vont bien ?",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 },
+      "collapsed": false
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "Etat des dependances",
+      "description": "LA PANNE 2 ET LA PANNE 6 SE DISTINGUENT ICI, ET NULLE PART AILLEURS. Les deux eteignent un carre au tableau. Panne 2, la base est tombee : la dependance passe a 0. Panne 6, le tableau est injoignable : la dependance reste a 1, le service va parfaitement bien, seul le chemin vers le tableau est coupe. Si ce panneau est vert et qu'un carre est eteint, ne cherchez pas dans la flotte.",
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 19 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "dependance_disponible",
+          "legendFormat": "{{service}} vers {{dependance}}",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "TOMBEE", "color": "red", "index": 0 } } },
+            { "type": "value", "options": { "1": { "text": "repond", "color": "green", "index": 1 } } }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "center"
+      }
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "Cibles vues par Prometheus",
+      "description": "Le nombre d'exemplaires qui repondent reellement pour chaque service. A 0, le conteneur est mort ou injoignable : c'est une panne d'existence, pas de capacite. Sert aussi a verifier qu'un passage a l'echelle a bien pris.",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 19 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (service) (up{job=\"flotte\"})",
+          "legendFormat": "{{service}}",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "center"
+      }
+    },
+
+    {
+      "id": 9,
+      "type": "row",
+      "title": "4. Est-ce que la version qui tourne est celle qu'on croit ?",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 25 },
+      "collapsed": false
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Depuis combien de temps chaque service tourne",
+      "description": "LA PANNE 5 SE VOIT ICI EN DEUX SECONDES. Un service dont le temps de fonctionnement retombe a zero en boucle est en train de redemarrer sans y arriver : image introuvable, ou configuration incomplete. Un service dont le temps repart de zero une seule fois vient d'etre remplace par un deploiement, ce qui est normal. La difference entre les deux, c'est le nombre de fois que la courbe retombe.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 26 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "time() - flotte_process_start_time_seconds",
+          "legendFormat": "{{service}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 8, "showPoints": "never" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "orange", "value": 30 },
+              { "color": "green", "value": 120 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "calcs": ["lastNotNull"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    }
+  ]
+}

@@ -6,29 +6,43 @@ global:
   # 5 secondes, c'est court. En production reelle on est plutot a 15 ou 30 :
   # chaque scrape coute une requete HTTP a l'application et une serie de points
   # a stocker. Ici on veut voir les effets pendant l'exercice, pas attendre une
-  # demi-minute qu'un panneau bouge — et c'est aussi ce qui permet a `up` de
-  # tomber a zero en moins de quinze secondes quand on arrete un conteneur.
+  # demi-minute qu'un panneau bouge, et c'est aussi ce qui permet a `up` de
+  # tomber a zero en moins de quinze secondes quand un conteneur s'arrete.
   scrape_interval: 5s
   scrape_timeout: 3s
 
 scrape_configs:
-  - job_name: todo-api
-    # Le chemin par defaut est deja /metrics, mais l'ecrire evite d'avoir a se
-    # souvenir du defaut le jour ou une cible expose autre chose.
-    metrics_path: /metrics
+  # --- Les quatre services de la flotte --------------------------------------
+  #
+  # Un seul job pour les quatre, et pas quatre jobs. La difference compte quand
+  # on ecrit les panneaux : avec un job par service, chaque requete devrait
+  # nommer les quatre jobs, et ajouter un cinquieme service obligerait a rouvrir
+  # tous les panneaux. Ici le service est une etiquette, et un panneau qui
+  # groupe par service prend le nouveau venu tout seul.
+  #
+  # Les services exposent /metriques et pas /metrics : tout le reste du projet
+  # est en francais, autant que ce soit coherent. Le chemin est donc explicite.
+  - job_name: flotte
+    metrics_path: /metriques
     static_configs:
-      - targets: ['todo-api:3000']
-        # Une etiquette posee ici se retrouve sur toutes les series de la
-        # cible. Pratique le jour ou une deuxieme instance apparait.
+      - targets:
+          - 'front:3000'
+          - 'api:3000'
+          - 'classement:3000'
+          - 'vigie:3000'
         labels:
           env: production
 
   # Prometheus se surveille lui-meme. Ca ne coute rien, et le jour ou les
-  # panneaux sont vides, la premiere question est "est-ce l'application qui ne
+  # panneaux sont vides, la premiere question est "est-ce la flotte qui ne
   # repond plus, ou Prometheus qui ne collecte plus ?". Cette cible repond.
   - job_name: prometheus
     static_configs:
       - targets: ['localhost:9090']
+
 # Le nom du service, jamais une adresse IP. C'est le DNS interne du reseau
-# compose qui resout todo-api, et cette adresse survit a un redeploiement la ou
-# une IP de conteneur change a chaque recreation.
+# compose qui resout api, front, classement et vigie, et ces adresses survivent
+# a un redeploiement la ou une IP de conteneur change a chaque recreation.
+#
+# Consequence a connaitre : Prometheus doit etre sur le meme reseau que la
+# flotte pour les resoudre. C'est ce que fait le bloc surveillance du compose.
