@@ -1,134 +1,67 @@
-# Alertes Grafana, provisionnées comme le reste : dans le dépôt, relisibles en
-# pull request, recréées à l'identique à chaque démarrage.
+# Les alertes de la flotte, declarees en fichier comme le reste.
 #
-# Deux alertes, pas dix. Une alerte qui se déclenche souvent et qu'on ignore est
-# pire que pas d'alerte du tout : elle apprend à l'équipe à ne plus regarder.
-# Chaque seuil ci-dessous est justifié par une mesure prise le 5 août 2026, pas
-# par une intuition.
+# Deux alertes, pas quinze. Le sujet dit qu'on ne surveille pas pour surveiller,
+# et une alerte qui se declenche tous les quarts d'heure est une alerte que
+# personne ne regarde plus au moment ou elle compte vraiment.
 apiVersion: 1
 
 groups:
   - orgId: 1
-    name: todo-api
-    folder: Alertes
-    # L'évaluation tourne toutes les 30 s. Inutile de descendre plus bas :
-    # Prometheus lui-même ne scrape que toutes les 5 s, et aucune des deux
-    # alertes ne se déclenche avant une minute.
+    name: flotte
+    folder: Flotte
     interval: 30s
-
     rules:
-      # -----------------------------------------------------------------------
-      #  1. L'API ne répond plus
-      # -----------------------------------------------------------------------
-      - uid: todo-api-indisponible
-        title: Todo API injoignable
-        condition: SEUIL
-        for: 1m
-        # POURQUOI 1 MINUTE, ET PAS MOINS.
-        #
-        # `up` bascule à 0 en 4 secondes (mesuré). On pourrait donc alerter en
-        # 10 secondes. Mais un déploiement normal coupe le service 2 à 10
-        # secondes (mesuré sur 4 exécutions) : une alerte à 10 s se
-        # déclencherait à CHAQUE mise en production. Au bout de trois jours,
-        # plus personne ne la lit.
-        #
-        # 1 minute = 12 scrapes consécutifs manqués, six fois la durée de la
-        # plus longue coupure de déploiement observée. Si l'API est absente
-        # depuis une minute, ce n'est pas un déploiement.
-        annotations:
-          summary: "L'API ne répond plus depuis 1 minute"
-          description: >-
-            up = 0 sur la cible todo-api. Ce n'est pas un déploiement : ceux-ci
-            coupent 2 à 10 s. Trois causes possibles, voir le § 6 de
-            docs/PROCEDURE_DEPLOIEMENT.md — c'est `docker ps -a` qui les sépare,
-            et il faut lire le code de sortie.
-          runbook_url: https://github.com/GabrielSaint-Louis/tp-devops-todo-api/blob/main/docs/PROCEDURE_DEPLOIEMENT.md
-        labels:
-          severite: critique
-        noDataState: Alerting
-        # NoData vaut Alerting et pas OK : si Prometheus ne renvoie plus rien du
-        # tout pour cette cible, c'est une raison de s'inquiéter, pas de se
-        # taire. Une alerte qui se désarme quand la surveillance tombe ne sert
-        # à rien.
-        execErrState: Alerting
+      - uid: service-injoignable
+        title: Un service de la flotte ne repond plus
+        condition: seuil
+        # C'est la panne d'existence : le conteneur est mort, ou Prometheus ne
+        # l'atteint plus. Elle precede toujours l'extinction d'un carre.
         data:
-          - refId: A
-            relativeTimeRange:
-              from: 300
-              to: 0
+          - refId: mesure
+            relativeTimeRange: { from: 120, to: 0 }
             datasourceUid: prometheus
             model:
-              refId: A
-              expr: up{job="todo-api"}
+              expr: min by (service) (up{job="flotte"})
               instant: true
-          - refId: SEUIL
+              refId: mesure
+          - refId: seuil
             datasourceUid: __expr__
             model:
-              refId: SEUIL
               type: threshold
-              expression: A
+              expression: mesure
               conditions:
-                - evaluator:
-                    type: lt
-                    params: [1]
+                - evaluator: { type: lt, params: [1] }
+              refId: seuil
+        for: 30s
+        labels: { gravite: critique }
+        annotations:
+          summary: "{{ $labels.service }} ne repond plus a Prometheus"
+          description: "Panne d'existence. Regardez d'abord docker compose ps, puis les logs du service."
 
-      # -----------------------------------------------------------------------
-      #  2. Trop d'erreurs serveur
-      # -----------------------------------------------------------------------
-      - uid: todo-api-taux-erreur
-        title: Todo API — plus de 5 % d'erreurs serveur
-        condition: SEUIL
-        for: 5m
-        # POURQUOI 5 % PENDANT 5 MINUTES.
-        #
-        # Ce n'est pas un chiffre choisi ici : c'est EXACTEMENT le critère de
-        # déclenchement du retour arrière écrit au § 4 de la procédure. L'alerte
-        # et la décision humaine partagent le même seuil, sinon l'une prévient
-        # pour des situations où l'autre ne fait rien, et la confiance s'érode.
-        #
-        # Les repères mesurés le 5 août 2026 :
-        #   - fonctionnement normal, même sous 12 req/s : 0,000 %
-        #   - base coupée : 65 %
-        # Il n'y a rien entre les deux. 5 % est donc largement au-dessus du
-        # bruit (inexistant) et largement en dessous d'une vraie panne.
-        #
-        # 5 minutes parce que la requête calcule un taux sur une fenêtre d'une
-        # minute : elle a besoin de temps pour être significative, et un pic de
-        # trois requêtes ratées à 4 h du matin ne doit réveiller personne.
-        annotations:
-          summary: "Plus de 5 % des réponses sont des erreurs serveur"
-          description: >-
-            Regarder le panneau 6 du tableau de bord pour savoir de quoi il
-            s'agit : des 503 signifient que la base est injoignable et que l'API
-            va bien (§ 6.2 de la procédure) ; des 500 signifient que c'est le
-            code, et le retour arrière s'impose (§ 4).
-          runbook_url: https://github.com/GabrielSaint-Louis/tp-devops-todo-api/blob/main/docs/PROCEDURE_DEPLOIEMENT.md
-        labels:
-          severite: critique
-        # OK et pas Alerting : sans aucun trafic, cette requête ne renvoie rien,
-        # et « personne n'appelle » n'est pas « tout casse ». C'est l'alerte
-        # ci-dessus qui couvre le cas où plus rien ne répond.
-        noDataState: OK
-        execErrState: Alerting
+      - uid: dependance-tombee
+        title: Une dependance de la flotte est tombee
+        condition: seuil
+        # Celle-ci distingue la panne 2 de la panne 6. Si un carre est eteint et
+        # que cette alerte est SILENCIEUSE, la flotte va bien et c'est le chemin
+        # vers le tableau qui est coupe.
         data:
-          - refId: A
-            relativeTimeRange:
-              from: 300
-              to: 0
+          - refId: mesure
+            relativeTimeRange: { from: 120, to: 0 }
             datasourceUid: prometheus
             model:
-              refId: A
-              expr: >-
-                100 * (sum(rate(http_requests_total{status=~"5.."}[1m])) or vector(0))
-                / sum(rate(http_requests_total[1m]))
+              expr: min by (service, dependance) (dependance_disponible)
               instant: true
-          - refId: SEUIL
+              refId: mesure
+          - refId: seuil
             datasourceUid: __expr__
             model:
-              refId: SEUIL
               type: threshold
-              expression: A
+              expression: mesure
               conditions:
-                - evaluator:
-                    type: gt
-                    params: [5]
+                - evaluator: { type: lt, params: [1] }
+              refId: seuil
+        for: 30s
+        labels: { gravite: importante }
+        annotations:
+          summary: "{{ $labels.service }} n'atteint plus {{ $labels.dependance }}"
+          description: "Le service tourne mais ne peut plus travailler. Sa route de sante repond 503."

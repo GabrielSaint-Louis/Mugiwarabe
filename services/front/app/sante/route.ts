@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { appeler } from '../disjoncteur';
+import { mesure } from '../mesure';
 
 export const dynamic = 'force-dynamic';
 
@@ -17,6 +18,7 @@ const API = process.env.API_URL || 'http://api:3000';
 // seul chemin qui continue de marteler une API deja tombee.
 export async function GET() {
   const api = (await appeler('api', `${API}/sante`)) !== null;
+  mesure.dependance.set({ dependance: 'api' }, api ? 1 : 0);
 
   return NextResponse.json({
     service: process.env.SERVICE || 'front',

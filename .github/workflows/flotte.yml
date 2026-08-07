@@ -127,8 +127,17 @@ jobs:
           # C'est le compose qui decrit la flotte : il part avec le reste, sinon
           # la machine cible deploierait la version d'hier avec les images
           # d'aujourd'hui.
+          #
+          # La configuration de Prometheus et le provisioning de Grafana partent
+          # avec lui. Un tableau de bord qui n'existe que dans un navigateur
+          # n'existe pas : il disparait avec le conteneur, et personne ne peut le
+          # remonter ailleurs.
           scp -i "$RUNNER_TEMP/ssh/cle" -o UserKnownHostsFile="$RUNNER_TEMP/ssh/known_hosts" \
               -P "$PORT_SSH" compose.prod.yml "$CIBLE:$DOSSIER/compose.prod.yml"
+          scp -i "$RUNNER_TEMP/ssh/cle" -o UserKnownHostsFile="$RUNNER_TEMP/ssh/known_hosts" \
+              -P "$PORT_SSH" deploy/prometheus.yml "$CIBLE:$DOSSIER/prometheus.yml"
+          scp -r -i "$RUNNER_TEMP/ssh/cle" -o UserKnownHostsFile="$RUNNER_TEMP/ssh/known_hosts" \
+              -P "$PORT_SSH" deploy/grafana "$CIBLE:$DOSSIER/"
 
       - name: Remplacer la flotte
         run: |

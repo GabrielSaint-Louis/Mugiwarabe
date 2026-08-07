@@ -168,6 +168,52 @@ services:
       retries: 10
       start_period: 10s
 
+  # --- LA SURVEILLANCE ----------------------------------- Amine (Mesure) ----
+  #
+  # Prometheus et Grafana vivaient deja sur la machine cible depuis J3, montes a
+  # la main. Les ramener dans le compose n'est pas un detail de rangement : tant
+  # qu'ils vivaient a cote, personne ne pouvait remonter la surveillance ailleurs
+  # sans connaitre les commandes tapees ce jour-la, et le sujet demande justement
+  # que la production change de main.
+  #
+  # Ils sont aussi sur le meme reseau que la flotte, ce qui est la condition pour
+  # que Prometheus resolve front, api, classement et vigie par leur nom.
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      # Deux heures suffisent pour la journee, et ca evite que la base de
+      # series remplisse le disque de la machine cible pendant l'exercice.
+      - '--storage.tsdb.retention.time=2h'
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - series:/prometheus
+    ports:
+      - "${PORT_PROMETHEUS:-9090}:9090"
+
+  grafana:
+    image: grafana/grafana:11.5.1
+    restart: unless-stopped
+    environment:
+      # Pas d'authentification. C'est un choix assume pour la journee : le
+      # tableau de bord doit s'ouvrir en deux secondes pendant qu'on parle
+      # devant la classe, et il n'est joignable que depuis la machine cible.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      # Le provisioning vient du depot. Un tableau de bord qui n'existe que dans
+      # un navigateur n'existe pas : il disparait avec le conteneur, et personne
+      # ne peut le remonter ailleurs.
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "${PORT_GRAFANA:-3001}:3000"
+    depends_on:
+      - prometheus
+
 volumes:
   # Les donnees du quiz. Elles survivent au remplacement des conteneurs, sinon
   # chaque deploiement remettrait les scores de la classe a zero.
@@ -176,3 +222,7 @@ volumes:
   # fichiers d'un conteneur, il partirait avec lui au prochain deploiement, et
   # disparaitrait de l'ecran pile au moment ou on livre, devant toute la classe.
   pavillon:
+  # Les series de Prometheus. Elles n'ont pas besoin de survivre a la journee,
+  # mais elles doivent survivre a un redeploiement : sinon chaque livraison
+  # effacerait l'historique juste avant le moment ou on en a besoin.
+  series:

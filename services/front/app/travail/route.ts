@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { appeler, dependanceCoupee } from '../disjoncteur';
+import { mesure } from '../mesure';
 
 export const dynamic = 'force-dynamic';
 
@@ -22,6 +23,12 @@ const API = process.env.API_URL || 'http://api:3000';
 export async function GET() {
   const debut = Date.now();
   const manche = await appeler<{ id: number }>('api', `${API}/manche`);
+
+  // Le coup est compte meme quand l'API n'a pas repondu : le front a bien fait
+  // son travail, qui est de rendre une page. C'est la meme logique que le 200
+  // renvoye plus bas.
+  mesure.coupsEncaisses.inc();
+  mesure.dependance.set({ dependance: 'api' }, manche === null ? 0 : 1);
 
   return NextResponse.json({
     fait: true,
