@@ -1,9 +1,23 @@
 // pouls.js : a importer depuis chaque service qui doit tenir un carre au tableau.
 //
-// Ce fichier est fourni par le sujet du jour 5 et depose ici tel quel : le
-// reecrire couterait une heure par equipage pour un resultat strictement
-// identique. Les quatre services de la flotte l'importent, seules les variables
-// d'environnement changent d'un service a l'autre.
+// Ce fichier est fourni par le sujet du jour 5 et a ete depose tel quel. Deux
+// lignes ont du etre corrigees quand l'adresse du tableau a enfin ete
+// communiquee, parce que le code du sujet ne correspond pas a ce que le tableau
+// expose reellement.
+//
+//   le sujet dit    POST /api/pouls        le tableau repond 404
+//   le tableau veut POST /api/battement    et il repond 200
+//
+//   le sujet lit    ordre.prochain_pouls_ms
+//   le tableau rend ordre.prochain_battement_ms
+//
+// Trouve en interrogeant le tableau : /api/pouls renvoyait une page d'erreur
+// HTML, que le pouls essayait de lire en JSON, d'ou le message
+// "Unexpected token 'T'" dans nos logs. Les quatre services parlaient donc
+// parfaitement, dans le vide.
+//
+// Les deux noms de champ sont acceptes, pour que ce fichier continue de
+// fonctionner si le tableau revient a la version du sujet.
 import os from "node:os";
 import fs from "node:fs";
 
@@ -14,6 +28,7 @@ const SERVICE = process.env.SERVICE;
 const VERSION = process.env.VERSION || "dev";
 const PAVILLON = process.env.PAVILLON_FICHIER || "/data/pavillon.txt";
 const MOI = process.env.URL_INTERNE || "http://localhost:3000";
+const CHEMIN = process.env.TABLEAU_CHEMIN || "/api/battement";
 
 let totalEncaisse = 0; // depuis le demarrage de ce process, affiche sur le carre
 let aDeclarer = 0; // encaisses depuis le dernier pouls, ce que le tableau attend
@@ -54,7 +69,7 @@ async function envoyerPouls() {
     let attente = 5000;
     const declares = aDeclarer;
     try {
-        const reponse = await fetch(`${TABLEAU}/api/pouls`, {
+        const reponse = await fetch(`${TABLEAU}${CHEMIN}`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -72,7 +87,7 @@ async function envoyerPouls() {
         // au courant : si l'appel echoue, ils repartiront dans le pouls suivant.
         aDeclarer -= declares;
         const ordre = await reponse.json();
-        attente = ordre.prochain_pouls_ms || 5000;
+        attente = ordre.prochain_battement_ms || ordre.prochain_pouls_ms || 5000;
         if (ordre.coups_a_encaisser > 0) await encaisser(ordre.coups_a_encaisser);
     } catch (erreur) {
         console.error("[pouls] tableau injoignable :", erreur.message);
