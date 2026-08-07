@@ -97,10 +97,12 @@ async function fabriquerDesQuestions() {
       }
     }
     journal.dernierEchec = null;
+    publierEtatDuModele();
     console.log(`[vigie] ${ajoutees} question(s) ajoutee(s), ${journal.rejetees} rejetees, ${journal.doublons} doublons`);
   } catch (erreur) {
     // On note et on continue. Le service reste parfaitement capable de repondre.
     journal.dernierEchec = erreur.message;
+    publierEtatDuModele();
     console.error('[vigie] fabrication impossible :', erreur.message);
   }
   return ajoutees;
@@ -183,6 +185,22 @@ app.get('/travail', async (requete, reponse) => {
   }
 });
 
+// Demande d'Amine en relecture : sortir l'etat du modele en metrique, et pas
+// seulement dans le JSON de /sante.
+//
+// Sans ca, une vigie qui ne fabrique plus est invisible sur les panneaux. Son
+// carre reste plein, sa dependance a la base va bien, et le seul signe est dans
+// un champ que quelqu'un doit penser a aller lire. Depuis que le jeu appelle la
+// vigie quand un joueur epuise la banque, ce silence bloque un joueur pour de
+// vrai.
+//
+// Elle est declaree comme une dependance a part entiere, ce qui la fait
+// apparaitre dans le panneau 3 sans qu'on touche a une seule requete.
+function publierEtatDuModele() {
+  const vivant = cleFournie() && !journal.dernierEchec;
+  mesure.dependance.set({ dependance: 'modele' }, vivant ? 1 : 0);
+}
+
 async function surveillerLaBase() {
   try {
     await pool.query('SELECT 1');
@@ -191,6 +209,7 @@ async function surveillerLaBase() {
     baseVivante = false;
   }
   mesure.dependance.set({ dependance: 'base' }, baseVivante ? 1 : 0);
+  publierEtatDuModele();
 }
 
 const serveur = app.listen(PORT, '0.0.0.0', () => {
