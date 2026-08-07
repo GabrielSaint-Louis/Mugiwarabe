@@ -59,7 +59,7 @@ la premiere chose que la classe apprend a lire ici.
 | ce qu'une livraison coute | **environ 2 s** d'absence du front |
 | retour arriere complet | **57 s** |
 | capacite d'un service | **1593 coups/s**, aucun rate |
-| marge sur ce que le tableau envoie | **facteur 25** |
+| marge sur ce que le tableau envoie | **facteur 25**, mesure au repos |
 | pavillon apres redeploiement | **present a 15 s**, deux fois d'affilee |
 | six pannes | toutes tirees, **chronometrees** |
 
@@ -119,3 +119,9 @@ Un README qui ne decrit que ce qui marche ment par omission.
   eu lieu.
 - **`restart: unless-stopped` ne relance pas un conteneur tue par commande.** Il
   protege d'un crash applicatif, pas d'un `docker kill`.
+- **La marge de facteur 25 est mesuree au repos**, sans panne en cours et sans
+  que la classe tire sur plusieurs flottes en meme temps. On ne sait pas encore
+  ce qu'elle vaut pendant l'ouverture du feu.
+- **Le tunnel ne sert qu'a l'usage humain.** S'il tombe, la classe ne peut plus
+  jouer a la main, mais aucun carre ne palit : les coups du tableau passent par
+  le pouls, qui sort de nos services et ne depend pas de cette adresse.
