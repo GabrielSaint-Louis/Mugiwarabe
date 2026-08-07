@@ -23,7 +23,8 @@ services:
       URL_INTERNE: http://front:3000
       API_URL: http://api:3000
       CLASSEMENT_URL: http://classement:3000
-      PAVILLON_FICHIER: /data/pavillon.txt
+      PAVILLON_FICHIER: /tmp/pavillon.txt
+      PAVILLON_SOURCE: http://api:3000/pavillon
     ports:
       # Le seul service publie vers l'exterieur. C'est par la que la classe
       # ouvre le quiz depuis son telephone, et c'est aussi le seul port dont la
@@ -35,12 +36,6 @@ services:
       # "address already in use" des que ce port etait pris par autre chose, et
       # une procedure qui ne marche que sur une machine n'est pas une procedure.
       - "${PORT_FRONT:-3000}:3000"
-    volumes:
-      # En lecture seule. Le front lit le pavillon pour le declarer dans son
-      # pouls, il n'a aucune raison de pouvoir l'ecrire. Si un jour quelqu'un se
-      # trompe de service dans une route d'ecriture, le systeme de fichiers dira
-      # non avant que la classe ne le voie.
-      - pavillon:/data:ro
     depends_on:
       - api
     healthcheck:
@@ -71,7 +66,8 @@ services:
     # rien, et ca l'empecherait au passage d'etre duplique au palier 4 : deux
     # conteneurs ne peuvent pas ecouter le meme port de la machine.
     volumes:
-      # En ecriture, celui-la : l'API est le seul service qui hisse le pavillon.
+      # Le seul service qui monte ce volume, et le seul qui ecrit dedans. Les
+      # trois autres viennent lire le pavillon sur GET /pavillon.
       - pavillon:/data
     depends_on:
       db:
@@ -98,13 +94,16 @@ services:
       SERVICE: classement
       VERSION: ${TAG}
       URL_INTERNE: http://classement:3000
-      PAVILLON_FICHIER: /data/pavillon.txt
+      # Ce service ne detient pas le pavillon : il le recupere aupres de l'API
+      # et en garde une copie hors du volume. Monter le volume en lecture aurait
+      # marche ici et casse au palier 7, ou un volume partage par plusieurs pods
+      # demande du ReadWriteMany que k3d ne garantit pas.
+      PAVILLON_FICHIER: /tmp/pavillon.txt
+      PAVILLON_SOURCE: http://api:3000/pavillon
       DB_HOST: db
       DB_NAME: ${DB_NAME}
       DB_USER: ${DB_USER}
       DB_PASSWORD: ${DB_PASSWORD}
-    volumes:
-      - pavillon:/data:ro
     depends_on:
       db:
         condition: service_healthy
@@ -126,7 +125,10 @@ services:
       SERVICE: vigie
       VERSION: ${TAG}
       URL_INTERNE: http://vigie:3000
-      PAVILLON_FICHIER: /data/pavillon.txt
+      # Ce service ne detient pas le pavillon : il le recupere aupres de l'API
+      # et en garde une copie hors du volume, pour la meme raison que les autres.
+      PAVILLON_FICHIER: /tmp/pavillon.txt
+      PAVILLON_SOURCE: http://api:3000/pavillon
       DB_HOST: db
       DB_NAME: ${DB_NAME}
       DB_USER: ${DB_USER}
@@ -134,8 +136,6 @@ services:
       # Absente, la vigie demarre quand meme et se rabat sur la reserve
       # existante. Le quiz tourne, le carre reste allume.
       GROQ_API_KEY: ${GROQ_API_KEY:-}
-    volumes:
-      - pavillon:/data:ro
     depends_on:
       db:
         condition: service_healthy

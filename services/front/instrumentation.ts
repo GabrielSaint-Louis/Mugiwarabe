@@ -8,5 +8,10 @@ export async function register() {
   if (process.env.NEXT_RUNTIME !== 'nodejs') return;
 
   const { demarrerLePouls } = await import('../../partage/pouls.js');
+  const { suivreLePavillon } = await import('../../partage/pavillon.js');
+
   demarrerLePouls();
+  // Le front ne detient pas le pavillon : il va le chercher aupres de l'API et
+  // en garde une copie locale, que le pouls relit a chaque battement.
+  suivreLePavillon();
 }

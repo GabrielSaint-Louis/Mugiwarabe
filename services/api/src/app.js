@@ -3,6 +3,7 @@ import { config } from './config.js';
 import { register, mesurerRequetes, coupsEncaisses } from './metrics.js';
 import { etatBase, interrogerLaBase, pool } from './db.js';
 import { mancheCourante, ouvrirUneManche, repondre } from './quiz.js';
+import { lire as lirePavillon, hisser } from './pavillon.js';
 
 export function creerApp() {
   const app = express();
@@ -70,6 +71,23 @@ export function creerApp() {
     }
     const resultat = await repondre(mancheId, String(joueur).slice(0, 40), choix);
     reponse.status(resultat.accepte ? 201 : 409).json(resultat);
+  });
+
+  // --- Le pavillon ----------------------------------------------------------
+  //
+  // L'API est le seul service qui l'ecrit. Les trois autres viennent le lire ici
+  // et en gardent une copie locale : sur le cluster, un volume monte par
+  // plusieurs pods a la fois demanderait du ReadWriteMany, que k3d ne garantit
+  // pas. Passer par HTTP donne le meme comportement dans les deux mondes.
+  app.post('/pavillon', (requete, reponse) => {
+    const resultat = hisser(requete.body?.pavillon ?? requete.body?.texte);
+    if (!resultat.ok) return reponse.status(400).json({ raison: resultat.raison });
+    console.log(`[pavillon] hisse : ${resultat.pavillon}`);
+    reponse.status(201).json({ pavillon: resultat.pavillon });
+  });
+
+  app.get('/pavillon', (requete, reponse) => {
+    reponse.json({ pavillon: lirePavillon() });
   });
 
   app.get('/metriques', async (requete, reponse) => {
