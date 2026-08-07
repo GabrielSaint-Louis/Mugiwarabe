@@ -2,6 +2,7 @@ import express from 'express';
 import pg from 'pg';
 import { creerMesure } from '../../../partage/mesure.js';
 import { demarrerLePouls } from '../../../partage/pouls.js';
+import { suivreLePavillon } from '../../../partage/pavillon.js';
 import { demanderDesQuestions, questionValable, cleFournie } from './groq.js';
 
 const SERVICE = process.env.SERVICE || 'vigie';
@@ -157,6 +158,9 @@ async function surveillerLaBase() {
 const serveur = app.listen(PORT, '0.0.0.0', () => {
   console.log(`[vigie] en ecoute sur le port ${PORT}`);
   demarrerLePouls();
+  // Ce service ne detient pas le pavillon : il va le chercher aupres de l'API
+  // et en garde une copie locale, que le pouls relit a chaque battement.
+  suivreLePavillon();
 });
 
 surveillerLaBase();

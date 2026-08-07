@@ -2,6 +2,7 @@ import express from 'express';
 import pg from 'pg';
 import { creerMesure } from '../../../partage/mesure.js';
 import { demarrerLePouls } from '../../../partage/pouls.js';
+import { suivreLePavillon } from '../../../partage/pavillon.js';
 
 const SERVICE = process.env.SERVICE || 'classement';
 const PORT = Number(process.env.PORT || 3000);
@@ -103,6 +104,9 @@ app.get('/travail', async (requete, reponse) => {
 const serveur = app.listen(PORT, '0.0.0.0', () => {
   console.log(`[classement] en ecoute sur le port ${PORT}`);
   demarrerLePouls();
+  // Ce service ne detient pas le pavillon : il va le chercher aupres de l'API
+  // et en garde une copie locale, que le pouls relit a chaque battement.
+  suivreLePavillon();
 });
 
 recalculer();
