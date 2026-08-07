@@ -271,7 +271,61 @@ deploiement ecrasera votre correction sans prevenir.
 
 ---
 
-## 6. Ce qu'on sait qui ne va pas
+## 6. La flotte sur le cluster
+
+La flotte tourne a deux endroits, et **il faut savoir lequel on regarde**. Sur
+`vm-prod` avec le compose, et sur le cluster k3d avec les manifestes. Les deux
+peuvent tourner en meme temps ; ce sont deux deploiements independants de la
+meme application.
+
+### 6.1 La poser
+
+```bash
+cp k8s/02-secret.example.yaml k8s/02-secret.yaml   # puis on remplit
+kubectl apply -f k8s/
+kubectl rollout status deployment/front -n mugiwarabe
+```
+
+Le front repond alors sur le port **8080** de la machine, par l'Ingress Traefik.
+
+### 6.2 Livrer sans eteindre un carre
+
+```bash
+kubectl set image deployment/front -n mugiwarabe front=<image>:<sha> -n mugiwarabe
+kubectl patch deployment front -n mugiwarabe --type=json \
+  -p='[{"op":"replace","path":"/spec/template/metadata/labels/version","value":"<sha>"}]'
+kubectl rollout status deployment/front -n mugiwarabe
+```
+
+Le label `version` sert deux fois : il est rendu au service par la variable
+`VERSION`, donc **le carre affiche exactement ce que le cluster a deploye**, et
+il change a chaque livraison, ce qui declenche le rolling update meme quand
+l'image porte le meme tag.
+
+Mesure chez nous : **171 sondes pendant une livraison, zero sans reponse**.
+
+### 6.3 Revenir en arriere
+
+```bash
+kubectl rollout undo deployment/front -n mugiwarabe
+kubectl rollout status deployment/front -n mugiwarabe
+```
+
+Plus rapide que le retour arriere par la pipeline (57 s), parce que l'ancienne
+version est deja sur le noeud.
+
+### 6.4 Ce qui ne marche pas pareil que sur le compose
+
+- **La reparation de la panne 3 change.** `kubectl exec -u root` n'existe pas.
+  Il faut soit un `securityContext` temporaire, soit supprimer le pod pour qu'il
+  soit recree : `kubectl delete pod -n mugiwarabe -l app=api`.
+- **L'API ne se livre pas sans interruption.** Elle monte la PVC du pavillon en
+  ReadWriteOnce, donc un exemplaire et strategie `Recreate`. Les trois autres
+  n'ont aucune interruption.
+- **Le pavillon ne survit pas a un `kubectl delete -f k8s/`.** La PVC part avec.
+  Rehissez-le apres, comme en section 4.6, en visant un pod de l'API.
+
+## 7. Ce qu'on sait qui ne va pas
 
 Un runbook qui ne liste que ce qui marche ment par omission.
 
