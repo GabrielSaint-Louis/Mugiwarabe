@@ -80,14 +80,41 @@ carre eteint au tableau, c'est la panne 6 et rien d'autre.
 
 ## 3. Les six pannes
 
-| # | La panne | Au tableau | Ce qui a casse | La manoeuvre |
-|---|---|---|---|---|
-| 1 | conteneur tue | un carre s'eteint puis revient seul | le process est mort, `restart: unless-stopped` le relance | aucune, on attend |
-| 2 | base coupee | le carre de l'API palit ou s'eteint, le front reste plein | rien dans l'API, sa dependance a disparu | `docker compose start db` |
-| 3 | pavillon muet | le pavillon disparait, tous les carres restent pleins | `/data` n'est plus lisible, le service tourne | `exec api chmod 755 /data` |
-| 4 | secret efface | un carre s'eteint au redemarrage suivant | configuration incomplete, image intacte | relancer le workflow, il reecrit le `.env` |
-| 5 | version introuvable | un carre s'eteint et ne revient pas | le tag demande n'existe pas sur le registry | relancer le workflow sur un commit valide |
-| 6 | tableau injoignable | un carre s'eteint alors que le service va parfaitement bien | rien, sauf le chemin entre le service et le tableau | corriger `TABLEAU_URL`, relancer le workflow |
+Les six ont ete tirees et chronometrees chez nous, avant l'ouverture du feu.
+**Deux ne se comportent pas comme on l'attendait**, et ce sont celles qui font
+perdre le plus de temps si on ne le sait pas.
+
+| # | La panne | Au tableau | Ce qui a casse | La manoeuvre | Chrono |
+|---|---|---|---|---|---|
+| 1 | conteneur tue | un carre s'eteint **et ne revient pas** | le conteneur est arrete, la politique de redemarrage ne joue pas | `docker compose up -d <service>` | 12 s |
+| 2 | base coupee | l'API, le classement et la vigie passent unhealthy, **le front reste plein** | rien chez eux, leur dependance a disparu | `docker compose start db` | **13 s** |
+| 3 | pavillon muet | le pavillon disparait, **les quatre carres restent pleins** | `/data` n'est plus lisible, le service tourne | `exec -u root api chmod 755 /data` | **13 s** |
+| 4 | secret efface | un carre s'eteint, le conteneur boucle en `Restarting (1)` | configuration incomplete, image intacte | relancer le workflow, il reecrit le `.env` | **22 s** |
+| 5 | version introuvable | **rien ne s'eteint**, le tag ne change simplement pas | le tag demande n'existe pas, compose refuse et laisse l'ancien tourner | corriger le `TAG`, relancer le workflow | **1 s** |
+| 6 | tableau injoignable | un carre s'eteint alors que **tout est vert partout** | rien, sauf le chemin entre le service et le tableau | corriger `TABLEAU_URL`, relancer le workflow | **23 s** |
+
+### Les deux surprises
+
+**Panne 1 : le carre ne revient pas tout seul.** On s'attendait a ce que
+`restart: unless-stopped` relance le conteneur. Il ne le fait pas, et le
+conteneur reste `Exited (137)` avec `RestartCount=0`. La raison est que Docker
+distingue un process qui meurt d'un conteneur qu'on lui a demande d'arreter :
+`docker kill` entre dans la seconde categorie, quel que soit le signal. La
+politique protege d'un crash applicatif, pas d'une commande d'arret.
+
+Consequence pratique : **n'attendez pas**. La manoeuvre est
+`docker compose up -d <service>`, et le carre revient en une douzaine de
+secondes.
+
+**Panne 5 : rien ne s'eteint.** `docker compose up -d` avec un tag inexistant
+echoue sur `manifest unknown` **et laisse l'ancien conteneur en place**. Le
+service continue de tourner, sa sonde reste verte, son carre reste plein. Ce qui
+change, c'est le **tag affiche sur le carre**, qui ne bouge pas alors qu'on
+vient de livrer.
+
+C'est la panne la plus silencieuse des six : au tableau, elle ressemble a un
+deploiement qui n'a jamais eu lieu. Le panneau 4 du tableau de bord est le seul
+endroit ou elle se voit franchement.
 
 **Un mot sur la reparation de la panne 3.** Remettre `/data` lisible repare la
 cause, mais le tableau garde la derniere valeur declaree jusqu'au pouls suivant :

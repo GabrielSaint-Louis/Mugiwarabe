@@ -167,8 +167,69 @@ vraie raison.
 
 ## Les six pannes tirees
 
-*(rempli au fur et a mesure du palier 5)*
+Toutes tirees sur la machine cible, avec les quatre panneaux sous les yeux.
 
-| # | Tiree a | Ce qu'on a vu au tableau | Ce qu'on a nomme | Vrai ? | Reparee en |
-|---|---|---|---|---|---|
-| | | | | | |
+| # | Ce que les panneaux montraient | Ce qu'on a nomme | Vrai ? | Reparee en |
+|---|---|---|---|---|
+| 1 | un service disparait des cibles, aucune dependance ne bouge | conteneur mort | oui | 12 s |
+| 2 | les quatre dependances a TOMBEE d'un coup | la base | oui | 13 s |
+| 3 | tout vert, aucun panneau ne bouge | pavillon, ou panne 6 | a moitie | 13 s |
+| 4 | un service disparait des cibles et y revient en boucle | configuration | oui | 22 s |
+| 5 | **absolument rien ne bouge** | on n'a pas su | non | 1 s |
+| 6 | tout vert, aucun panneau ne bouge | pavillon, ou panne 6 | a moitie | 23 s |
+
+### I-07. La politique de redemarrage ne fait pas ce qu'on croyait
+
+**Ce qu'on a fait** : tire la panne 1, un conteneur tue.
+
+**Ce qu'on attendait** : `restart: unless-stopped` relance le conteneur, le
+carre revient tout seul en quelques secondes.
+
+**Ce qui s'est passe** : rien. `Exited (137)`, `RestartCount=0`, et il serait
+reste mort toute la journee.
+
+**La cause** : Docker distingue un process qui meurt d'un conteneur qu'on lui a
+demande d'arreter. `docker kill` entre dans la seconde categorie quel que soit
+le signal envoye. La politique protege d'un crash applicatif, pas d'une commande
+d'arret. On a verifie les deux facons de tuer, `docker kill` et
+`docker compose kill` : meme resultat.
+
+**Ce qu'on en retient** : on aurait attendu devant l'ecran qu'un carre revienne
+tout seul, en public. Le runbook dit maintenant de ne pas attendre.
+
+### I-08. La panne 5 n'eteint aucun carre, et c'est pire
+
+**Ce qu'on a fait** : tire la panne 5, un tag d'image qui n'existe pas.
+
+**Ce qu'on attendait** : le carre s'eteint et ne revient pas.
+
+**Ce qui s'est passe** : `manifest unknown`, et **le conteneur precedent a
+continue de tourner**. Sonde verte, carre plein, service parfaitement
+fonctionnel. Douze minutes d'uptime affichees comme si de rien n'etait.
+
+**Ce qu'on en retient** : c'est la panne la plus silencieuse des six. Au tableau
+elle ressemble a un deploiement qui n'a jamais eu lieu, et la seule chose qui
+change est le tag affiche sur le carre, qui ne bouge pas alors qu'on vient de
+livrer. C'est exactement la question 4 du tableau de bord : est-ce que la
+version qui tourne est celle qu'on croit ?
+
+C'est aussi la seule des six qu'on n'a pas su nommer en regardant l'ecran. On
+l'assume : elle ne produit aucun signal visuel, et il faut aller lire le tag.
+
+### I-09. Les pannes 3 et 6 sont indiscernables sur les panneaux
+
+**Ce qu'on a fait** : tire les deux, chacune leur tour.
+
+**Ce qui s'est passe** : dans les deux cas, tous les panneaux sont verts. Les
+dependances repondent, les cibles sont la, la latence est normale.
+
+**La difference est ailleurs** : la panne 3 fait disparaitre le **pavillon**, la
+panne 6 fait disparaitre un **carre**. Les deux se lisent sur le tableau de la
+classe, pas sur nos panneaux.
+
+**Ce qu'on en retient** : nos quatre panneaux repondent a la question "est-ce
+que la flotte va bien". Ils ne repondent pas a la question "est-ce que la flotte
+arrive a le raconter". C'est une limite qu'on assume, parce qu'ajouter un
+cinquieme panneau qui surveille notre propre pouls reviendrait a surveiller le
+surveillant. La bonne reponse est le reflexe, pas le panneau : panneaux verts
+plus carre eteint, la panne est entre nous et le tableau.
