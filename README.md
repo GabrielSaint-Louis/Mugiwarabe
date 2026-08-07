@@ -13,7 +13,7 @@ du TP DevOps.
 | Couleur au tableau | `#8B4513` |
 | Carres jures | **4** |
 | Pavillon | Je serai le Roi des DevOps |
-| Application | **Grand Line**, un quiz en direct |
+| Application | **Grand Line**, un quiz sans fin |
 
 <br clear="right">
 
@@ -40,10 +40,30 @@ de fusion n'est jamais celui de la branche.
 | Le service | Ce qu'il fait | Carre |
 |---|---|---|
 | `front` | la page du quiz, en Next et TypeScript, seul service publie | oui |
-| `api` | les questions, les reponses, les scores, **et le pavillon** | oui |
-| `classement` | agrege les scores et calcule le classement des manches | oui |
-| `vigie` | fabrique de nouvelles questions en parlant a un modele externe | oui |
+| `api` | les parties, les questions servies, le chronometre, **et le pavillon** | oui |
+| `classement` | agrege les meilleures series | oui |
+| `vigie` | fabrique de nouvelles questions **quand un joueur a epuise la banque** | oui |
 | `db` | PostgreSQL | **non** |
+
+## La regle du jeu
+
+On repond tant qu'on ne se trompe pas. Une seule erreur, ou quinze secondes sans
+repondre, et la partie s'arrete. Le score, c'est la longueur de la serie.
+
+Quand un joueur a repondu a **toutes** les questions de la base, l'API demande a
+la vigie d'en fabriquer de nouvelles, qui sont enregistrees au passage : la base
+s'enrichit en jouant. C'est ce qui rend le quatrieme carre indispensable plutot
+que decoratif. Si la vigie tombe, un joueur qui a tout repondu s'arrete la, et sa
+serie est validee : ce n'est pas une defaite.
+
+Le nom n'est demande **qu'a la fin**, quand il y a quelque chose a inscrire. Un
+classement de pseudos tires au hasard avant d'avoir joue ne veut rien dire.
+
+Le chronometre est verifie cote serveur, a partir de l'heure ou la question a ete
+servie : un compte a rebours qui ne vivrait que dans le navigateur se
+falsifierait en changeant l'horloge de son telephone.
+
+## La flotte, suite
 
 La base n'a pas de carre, et ce n'est pas un oubli : une base ne parle pas HTTP,
 elle ne peut pas envoyer de pouls. Le jour ou elle coule, c'est le carre de

@@ -144,3 +144,100 @@ footer code { background: rgba(139, 69, 19, .1); padding: .1rem .35rem; border-r
   .propositions button:hover:not(:disabled) { background: #3a2a1d; }
   .avertissement, .fige { background: #3a2c12; color: #f0d9a4; border-color: #7a5c20; }
 }
+
+/* --- Le compte a rebours et le rang du joueur ------------------------------ */
+.chrono {
+  float: right;
+  padding: .1rem .55rem;
+  font-size: .75rem;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: .04em;
+  border-radius: .5rem;
+  background: rgba(139, 69, 19, .12);
+  color: var(--bois);
+}
+
+.chrono.urgent { background: #fdf1d8; color: #a3341f; border: 1px solid #e3b661; }
+
+/* La ligne du joueur ressort du classement : sur un telephone, chercher son
+   propre pseudo dans vingt lignes pendant qu'une manche tourne est perdu. */
+.classement li.moi {
+  background: rgba(139, 69, 19, .08);
+  border-radius: .4rem;
+  padding-left: .4rem;
+  padding-right: .4rem;
+  font-weight: 600;
+}
+
+@media (prefers-color-scheme: dark) {
+  .chrono { background: rgba(214, 160, 100, .16); color: #e8c08a; }
+  .classement li.moi { background: rgba(214, 160, 100, .12); }
+}
+
+/* --- Le jeu : chrono, bouton principal, inscription ------------------------ */
+.chrono {
+  float: right;
+  padding: .1rem .55rem;
+  font-size: .75rem;
+  font-variant-numeric: tabular-nums;
+  border-radius: .5rem;
+  background: rgba(139, 69, 19, .12);
+  color: var(--bois);
+}
+.chrono.urgent { background: #fdf1d8; color: #a3341f; border: 1px solid #e3b661; }
+
+button.gros {
+  margin-top: 1.1rem;
+  width: 100%;
+  padding: .85rem 1rem;
+  font: inherit;
+  font-weight: 600;
+  color: var(--creme);
+  background: var(--bois);
+  border: none;
+  border-radius: .6rem;
+  cursor: pointer;
+  transition: background .12s ease;
+}
+button.gros:hover { background: var(--bois-clair); }
+
+/* Une question fabriquee a l'instant merite d'etre signalee : c'est le moment
+   ou le service annexe devient visible pour le joueur. */
+.fraiche {
+  margin: 0 0 .8rem;
+  padding: .5rem .8rem;
+  font-size: .85rem;
+  border-radius: .5rem;
+  background: rgba(139, 69, 19, .08);
+  color: var(--bois);
+  border-left: 3px solid var(--bois);
+}
+
+.inscription { margin-top: 1rem; }
+.inscription label { display: block; font-size: .85rem; color: #7a6a58; margin-bottom: .35rem; }
+.inscription .ligne { display: flex; gap: .5rem; }
+.inscription input {
+  flex: 1;
+  padding: .6rem .8rem;
+  font: inherit;
+  color: var(--encre);
+  background: var(--parchemin);
+  border: 1px solid rgba(139, 69, 19, .25);
+  border-radius: .5rem;
+}
+.inscription button {
+  padding: .6rem 1rem;
+  font: inherit;
+  color: var(--creme);
+  background: var(--bois);
+  border: none;
+  border-radius: .5rem;
+  cursor: pointer;
+}
+.inscription button:disabled { opacity: .45; cursor: default; }
+
+@media (prefers-color-scheme: dark) {
+  .chrono { background: rgba(214, 160, 100, .16); color: #e8c08a; }
+  .fraiche { background: rgba(214, 160, 100, .1); color: #e8c08a; }
+  .inscription input { background: #2f2218; border-color: rgba(214, 160, 100, .22); color: var(--encre); }
+}
