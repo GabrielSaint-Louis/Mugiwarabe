@@ -20,6 +20,10 @@ data:
   API_URL: http://api
   CLASSEMENT_URL: http://classement
   PAVILLON_SOURCE: http://api/pavillon
-  # L'adresse du tableau. Vide tant que le formateur ne l'a pas communiquee :
-  # les services demarrent quand meme et le signalent dans leurs logs.
-  TABLEAU_URL: ""
+  # L'adresse du tableau, communiquee en cours de journee.
+  TABLEAU_URL: "https://services-battle.vercel.app"
+  # Le chemin du battement. Le sujet fournit /api/pouls, le tableau expose
+  # /api/battement : la valeur est ici pour qu'on puisse la corriger sans
+  # reconstruire une image si le tableau change en cours d'apres-midi.
+  TABLEAU_CHEMIN: "/api/battement"
+  VIGIE_URL: "http://vigie"
