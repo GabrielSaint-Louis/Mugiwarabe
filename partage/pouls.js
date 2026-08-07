@@ -81,6 +81,9 @@ async function envoyerPouls() {
                 groupe: GROUPE,
                 couleur: COULEUR,
                 service: SERVICE,
+                // Le tableau lit "conteneur" ; on envoie les deux, l'ancien nom
+                // ne coute rien et evite de casser si le contrat revient en arriere.
+                conteneur: os.hostname(),
                 pod: os.hostname(),
                 version: VERSION,
                 pavillon: lirePavillon(),
