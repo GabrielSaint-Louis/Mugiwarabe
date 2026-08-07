@@ -22,19 +22,22 @@ const API = process.env.API_URL || 'http://api:3000';
 // jusqu'a faire palir le carre quand meme.
 export async function GET() {
   const debut = Date.now();
-  const manche = await appeler<{ id: number }>('api', `${API}/manche`);
+  // Le travail du front, c'est de composer une page. Ici il demande le
+  // classement, ce qui traverse vraiment le reseau interne et coute quelque
+  // chose de reel.
+  const vu = await appeler<unknown>('api', `${API}/sante`);
 
   // Le coup est compte meme quand l'API n'a pas repondu : le front a bien fait
   // son travail, qui est de rendre une page. C'est la meme logique que le 200
   // renvoye plus bas.
   mesure.coupsEncaisses.inc();
-  mesure.dependance.set({ dependance: 'api' }, manche === null ? 0 : 1);
+  mesure.dependance.set({ dependance: 'api' }, vu === null ? 0 : 1);
 
   return NextResponse.json({
     fait: true,
-    degrade: manche === null,
+    degrade: vu === null,
     disjoncteur_ouvert: dependanceCoupee('api'),
-    manche_disponible: manche !== null,
+    api_repond: vu !== null,
     duree_ms: Date.now() - debut,
   });
 }

@@ -2,7 +2,7 @@ import express from 'express';
 import { config } from './config.js';
 import { creerMesure } from '../../../partage/mesure.js';
 import { etatBase, interrogerLaBase, pool } from './db.js';
-import { mancheCourante, ouvrirUneManche, repondre } from './quiz.js';
+import { commencerUnePartie, etatDeLaPartie, repondre, inscrireAuClassement, compterLesParties, SECONDES_PAR_QUESTION } from './quiz.js';
 import { lire as lirePavillon, hisser } from './pavillon.js';
 
 // Le registre de l'API vient du meme fabricant que celui des trois autres
@@ -47,13 +47,9 @@ export function creerApp() {
   // l'etat du service.
   app.get('/travail', async (requete, reponse) => {
     try {
-      const { rows } = await pool.query(`
-        SELECT count(*)::int AS reponses, count(*) FILTER (WHERE juste)::int AS justes
-        FROM reponse r JOIN manche m ON m.id = r.manche_id
-        WHERE m.fermee_le IS NULL
-      `);
+      const compte = await compterLesParties();
       mesure.coupsEncaisses.inc();
-      reponse.json({ fait: true, ...rows[0] });
+      reponse.json({ fait: true, ...compte });
     } catch (erreur) {
       // 503 : le coup n'a pas ete encaisse. Repondre 200 ici gonflerait le
       // compteur du tableau avec du travail qui n'a jamais eu lieu, et le carre
@@ -63,25 +59,50 @@ export function creerApp() {
   });
 
   // --- Le quiz --------------------------------------------------------------
-  app.get('/manche', async (requete, reponse) => {
-    const manche = await mancheCourante();
-    if (!manche) return reponse.status(404).json({ raison: 'aucune manche ouverte' });
-    reponse.json(manche);
-  });
-
-  app.post('/manche', async (requete, reponse) => {
-    const manche = await ouvrirUneManche();
-    if (!manche) return reponse.status(409).json({ raison: 'aucune question validee en reserve' });
-    reponse.status(201).json(manche);
-  });
-
-  app.post('/reponse', async (requete, reponse) => {
-    const { manche_id: mancheId, joueur, choix } = requete.body || {};
-    if (!mancheId || !joueur || !Number.isInteger(choix)) {
-      return reponse.status(400).json({ raison: 'manche_id, joueur et choix sont attendus' });
+  //
+  // Une partie, c'est la serie d'un joueur : il repond tant qu'il ne se trompe
+  // pas. Rien n'est synchronise entre les joueurs, chacun avance a son rythme.
+  //
+  // La bonne reponse ne sort jamais d'ici tant que la partie est en cours : le
+  // front la recevrait, et n'importe qui ouvrant les outils de developpement
+  // verrait la solution avant de repondre.
+  app.post('/partie', async (requete, reponse) => {
+    const partie = await commencerUnePartie();
+    if (!partie.question) {
+      return reponse.status(503).json({ raison: 'aucune question disponible' });
     }
-    const resultat = await repondre(mancheId, String(joueur).slice(0, 40), choix);
-    reponse.status(resultat.accepte ? 201 : 409).json(resultat);
+    reponse.status(201).json({ ...partie, secondes: SECONDES_PAR_QUESTION });
+  });
+
+  app.get('/partie/:jeton', async (requete, reponse) => {
+    const partie = await etatDeLaPartie(requete.params.jeton);
+    if (!partie) return reponse.status(404).json({ raison: 'partie inconnue' });
+    reponse.json({
+      serie: partie.serie,
+      en_cours: partie.en_cours,
+      fin: partie.fin,
+      joueur: partie.joueur,
+      secondes_restantes: partie.secondes_restantes,
+      question: partie.en_cours && partie.question_id
+        ? { id: partie.question_id, texte: partie.texte, propositions: partie.propositions, origine: partie.origine }
+        : null,
+    });
+  });
+
+  app.post('/partie/:jeton/reponse', async (requete, reponse) => {
+    const choix = requete.body?.choix;
+    if (!Number.isInteger(choix) || choix < 0 || choix > 3) {
+      return reponse.status(400).json({ raison: 'choix attendu, entre 0 et 3' });
+    }
+    const resultat = await repondre(requete.params.jeton, choix);
+    if (resultat.erreur) return reponse.status(409).json(resultat);
+    reponse.json(resultat);
+  });
+
+  // Le nom n'est demande qu'a la fin, quand il y a quelque chose a inscrire.
+  app.post('/partie/:jeton/nom', async (requete, reponse) => {
+    const resultat = await inscrireAuClassement(requete.params.jeton, requete.body?.joueur);
+    reponse.status(resultat.ok ? 201 : 400).json(resultat);
   });
 
   // --- Le pavillon ----------------------------------------------------------

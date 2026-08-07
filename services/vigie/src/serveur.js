@@ -49,11 +49,19 @@ const journal = {
   rejetees: 0,
   derniereTentative: null,
   dernierEchec: null,
+  doublons: 0,
 };
 
+// Une seule fabrication a la fois. Sans ce verrou, dix joueurs qui epuisent la
+// banque en meme temps declencheraient dix appels au modele en parallele : on
+// brulerait le quota et on paierait dix fois la meme latence. Les autres
+// attendent celle qui est en cours et profitent de son resultat.
+let fabricationEnCours = null;
+
 async function fabriquerDesQuestions() {
-  if (!cleFournie()) return;
+  if (!cleFournie()) return 0;
   journal.derniereTentative = new Date().toISOString();
+  let ajoutees = 0;
   try {
     const brutes = await demanderDesQuestions();
     for (const brute of brutes) {
@@ -61,24 +69,41 @@ async function fabriquerDesQuestions() {
         journal.rejetees++;
         continue;
       }
-      // Les questions fabriquees entrent en reserve NON validees. C'est
-      // /travail qui les fait passer en jeu, une par une : le modele externe
-      // propose, la vigie dispose.
-      await pool.query(
+      // Les questions fabriquees entrent VALIDEES.
+      //
+      // C'etait l'inverse au depart : elles attendaient qu'un coup du tableau
+      // les valide une par une. Ca ne tient plus depuis que le jeu appelle la
+      // vigie quand un joueur a epuise la banque : il attend sa question tout
+      // de suite, pas au prochain tir de la classe.
+      //
+      // La validation n'a pas disparu pour autant, elle a change de place :
+      // questionValable() ci-dessus refuse ce qui n'a pas quatre propositions
+      // distinctes et une bonne reponse dans les clous. Le modele propose, la
+      // vigie dispose, simplement plus tot.
+      //
+      // ON CONFLICT DO NOTHING : un modele qui tourne sur le meme sujet finit
+      // toujours par se repeter, et la contrainte d'unicite sur le texte est
+      // ce qui empeche un joueur de revoir la meme question dans sa serie.
+      const insertion = await pool.query(
         `INSERT INTO question (texte, propositions, bonne, origine, validee)
-         VALUES ($1, $2, $3, 'vigie', FALSE)`,
+         VALUES ($1, $2, $3, 'vigie', TRUE) ON CONFLICT DO NOTHING RETURNING id`,
         [brute.texte.trim(), JSON.stringify(brute.propositions), brute.bonne],
       );
-      journal.fabriquees++;
+      if (insertion.rows[0]) {
+        journal.fabriquees++;
+        ajoutees++;
+      } else {
+        journal.doublons++;
+      }
     }
     journal.dernierEchec = null;
-    console.log(`[vigie] reserve alimentee : ${journal.fabriquees} au total, ${journal.rejetees} rejetees`);
+    console.log(`[vigie] ${ajoutees} question(s) ajoutee(s), ${journal.rejetees} rejetees, ${journal.doublons} doublons`);
   } catch (erreur) {
-    // On note et on continue. Le prochain passage retentera dans trois minutes,
-    // et entre-temps le service reste parfaitement capable de repondre.
+    // On note et on continue. Le service reste parfaitement capable de repondre.
     journal.dernierEchec = erreur.message;
     console.error('[vigie] fabrication impossible :', erreur.message);
   }
+  return ajoutees;
 }
 
 const app = express();
@@ -102,8 +127,27 @@ app.get('/sante', (requete, reponse) => {
       dernier_echec: journal.dernierEchec,
       fabriquees: journal.fabriquees,
       rejetees: journal.rejetees,
+      doublons: journal.doublons,
     },
   });
+});
+
+// La route que l'API appelle quand un joueur a epuise la banque.
+//
+// C'est ce qui fait que ce service n'est pas decoratif : si la vigie tombe, un
+// joueur qui a tout repondu s'arrete la. Son carre au tableau a une consequence
+// visible dans le jeu.
+app.post('/fabriquer', async (requete, reponse) => {
+  if (!cleFournie()) {
+    return reponse.status(503).json({ ajoutees: 0, raison: 'aucune cle fournie' });
+  }
+  // Si une fabrication tourne deja, on attend la sienne au lieu d'en lancer une
+  // autre.
+  if (!fabricationEnCours) {
+    fabricationEnCours = fabriquerDesQuestions().finally(() => { fabricationEnCours = null; });
+  }
+  const ajoutees = await fabricationEnCours;
+  reponse.status(ajoutees > 0 ? 201 : 503).json({ ajoutees });
 });
 
 app.get('/reserve', async (requete, reponse) => {
@@ -128,18 +172,12 @@ app.get('/reserve', async (requete, reponse) => {
 app.get('/travail', async (requete, reponse) => {
   try {
     const { rows } = await pool.query(`
-      UPDATE question SET validee = TRUE
-      WHERE id = (
-        SELECT id FROM question WHERE NOT validee
-        ORDER BY creee_le LIMIT 1 FOR UPDATE SKIP LOCKED
-      )
-      RETURNING id
+      SELECT count(*)::int AS total,
+             count(*) FILTER (WHERE origine = 'vigie')::int AS fabriquees
+      FROM question WHERE validee
     `);
     mesure.coupsEncaisses.inc();
-    // Reserve vide, c'est un cas normal et pas une erreur : on repond 200 avec
-    // zero validation. Repondre 503 ici ferait palir le carre alors que le
-    // service fonctionne parfaitement.
-    reponse.json({ fait: true, validee: rows[0]?.id ?? null });
+    reponse.json({ fait: true, ...rows[0] });
   } catch (erreur) {
     reponse.status(503).json({ fait: false, raison: erreur.message });
   }

@@ -48,16 +48,38 @@ let calculeLe = null;
 
 async function recalculer() {
   try {
+    // Le classement compte des series, pas des points cumules.
+    //
+    // Une serie, c'est le nombre de bonnes reponses d'affilee avant la premiere
+    // erreur. Un joueur qui rejoue dix fois n'accumule donc rien : seule sa
+    // meilleure tentative compte, et le classement mesure une performance plutot
+    // qu'un temps de presence.
+    //
+    // On ne garde que les parties nommees. Le nom n'est demande qu'a la fin,
+    // quand il y a quelque chose a inscrire : un classement de pseudos tires au
+    // hasard avant d'avoir joue ne veut rien dire.
     const { rows } = await pool.query(`
-      SELECT joueur,
-             count(*) FILTER (WHERE juste)::int AS points,
-             count(*)::int AS reponses
-      FROM reponse
-      GROUP BY joueur
-      ORDER BY points DESC, min(donnee_le) ASC
-      LIMIT 20
+      SELECT DISTINCT ON (lower(joueur))
+             joueur,
+             serie,
+             fin,
+             terminee_le
+      FROM partie
+      WHERE joueur IS NOT NULL AND NOT en_cours
+      ORDER BY lower(joueur), serie DESC, terminee_le ASC
     `);
-    classement = rows.map((ligne, rang) => ({ rang: rang + 1, ...ligne }));
+    classement = rows
+      .sort((a, b) => b.serie - a.serie || new Date(a.terminee_le) - new Date(b.terminee_le))
+      .slice(0, 20)
+      .map((ligne, rang) => ({
+        rang: rang + 1,
+        joueur: ligne.joueur,
+        serie: ligne.serie,
+        // Une partie qui s'arrete sur banque epuisee n'est pas une defaite : le
+        // joueur a repondu juste a tout ce qui existait. Ca merite d'etre
+        // affiche autrement qu'une erreur.
+        exploit: ligne.fin === 'banque epuisee',
+      }));
     calculeLe = new Date().toISOString();
     baseVivante = true;
   } catch (erreur) {
@@ -93,12 +115,12 @@ app.get('/classement', (requete, reponse) => {
 // millisecondes et il touche a l'etat reel du service, ce que le sujet demande.
 app.get('/travail', async (requete, reponse) => {
   const { rows } = await pool.query(
-    'SELECT count(*)::int AS n FROM reponse WHERE juste',
+    'SELECT count(*)::int AS n, COALESCE(max(serie),0)::int AS record FROM partie WHERE joueur IS NOT NULL',
   ).catch(() => ({ rows: null }));
 
   if (!rows) return reponse.status(503).json({ fait: false });
   mesure.coupsEncaisses.inc();
-  reponse.json({ fait: true, bonnes_reponses: rows[0].n });
+  reponse.json({ fait: true, parties_inscrites: rows[0].n, record: rows[0].record });
 });
 
 const serveur = app.listen(PORT, '0.0.0.0', () => {

@@ -188,7 +188,13 @@ services:
       # series remplisse le disque de la machine cible pendant l'exercice.
       - '--storage.tsdb.retention.time=2h'
     volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      # Le chemin est une variable, et pas une constante, pour la meme raison
+      # que le port du front. Sur la machine cible, la pipeline depose
+      # prometheus.yml et grafana/ a cote du compose, donc la valeur par defaut
+      # convient. Sur le poste de quelqu'un qui monte la flotte depuis le depot,
+      # ces fichiers sont dans deploy/, et le montage echouait avec un
+      # "not a directory" incomprehensible. On met alors SURVEILLANCE=./deploy.
+      - ${SURVEILLANCE:-.}/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - series:/prometheus
     ports:
       - "${PORT_PROMETHEUS:-9090}:9090"
@@ -207,8 +213,8 @@ services:
       # Le provisioning vient du depot. Un tableau de bord qui n'existe que dans
       # un navigateur n'existe pas : il disparait avec le conteneur, et personne
       # ne peut le remonter ailleurs.
-      - ./grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - ${SURVEILLANCE:-.}/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ${SURVEILLANCE:-.}/grafana/dashboards:/var/lib/grafana/dashboards:ro
     ports:
       - "${PORT_GRAFANA:-3001}:3000"
     depends_on:
