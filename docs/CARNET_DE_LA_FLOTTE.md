@@ -192,3 +192,40 @@ Le seul gain reel des trois exemplaires apparait a faible parallelisme : la
 latence mediane tombe a 18 ms contre 148. Ils ne servent donc pas a encaisser
 plus, mais a repondre plus vite quand la charge est moderee. Ce n'est pas ce
 qu'on cherchait, mais ca se defend.
+
+
+---
+
+## 6. Ce que la flotte encaisse quand on l'attaque
+
+Mesures prises une fois les carres allumes, en tuant des pods pendant que le
+tableau nous regardait. C'est la question qui compte pour l'apres-midi : le prof
+va attaquer l'infrastructure depuis le tableau, et ce qui se voit alors, ce sont
+les carres.
+
+| L'attaque | Ce que le tableau a montre |
+|---|---|
+| un pod du front tue (2 exemplaires) | **rien**, les quatre carres restent pleins |
+| le pod de l'API tue (1 seul exemplaire) | **rien**, carre plein a t+6 s deja |
+| **tous les pods tues d'un coup** | **rien**, les quatre restent pleins |
+
+Le troisieme cas nous a surpris nous-memes. L'explication tient a trois choses
+qui se combinent :
+
+- le `preStop` de cinq secondes fait que le pod condamne continue de servir, et
+  donc d'envoyer son pouls, pendant que son remplacant demarre
+- Kubernetes recree immediatement, il ne demande la permission a personne
+- le tableau tolere huit secondes de silence avant d'eteindre un carre
+
+Le trou passe donc sous le seuil. Ce n'est pas de la chance : chacun de ces trois
+chiffres a ete choisi, et c'est leur somme qui tient.
+
+### Pourquoi ce n'aurait pas marche sur le compose
+
+La meme attaque sur la machine cible aurait eteint un carre **definitivement**.
+On l'a mesure au palier 5 : `docker kill` laisse le conteneur `Exited (137)`
+avec `RestartCount=0`, parce que Docker distingue un process qui meurt d'un
+conteneur qu'on lui a demande d'arreter.
+
+C'est la raison pour laquelle les carres sont tenus par le cluster et non par
+`vm-prod`. Les deux deploiements fonctionnent, mais un seul survit a une attaque.
