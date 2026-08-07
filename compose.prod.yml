@@ -1,0 +1,178 @@
+# compose.prod.yml : la flotte telle qu'elle tourne sur la machine cible.
+#
+# Ce fichier est le seul endroit ou la flotte est decrite. Il part sur la machine
+# cible par la pipeline, avec un .env que le job de deploiement ecrit lui-meme :
+# personne ne tape de commande a la main la-bas.
+#
+# Le fichier est decoupe en blocs, un service par bloc, et chacun a son
+# proprietaire. Deux personnes qui ajoutent leur service a la fin du fichier
+# creent un conflit de fusion ; deux personnes qui ecrivent dans leur bloc n'en
+# creent aucun.
+
+services:
+  # --- LE FRONT ------------------------------------------ Ousmane (Etat) ----
+  front:
+    image: ${REGISTRY}/${GROUPE}-front:${TAG}
+    restart: unless-stopped
+    environment:
+      TABLEAU_URL: ${TABLEAU_URL}
+      GROUPE: ${GROUPE}
+      COULEUR: ${COULEUR}
+      SERVICE: front
+      VERSION: ${TAG}
+      URL_INTERNE: http://front:3000
+      API_URL: http://api:3000
+      CLASSEMENT_URL: http://classement:3000
+      PAVILLON_FICHIER: /data/pavillon.txt
+    ports:
+      # Le seul service publie vers l'exterieur. C'est par la que la classe
+      # ouvre le quiz depuis son telephone, et c'est aussi le seul port dont la
+      # flotte a besoin : tout le reste se parle sur le reseau interne.
+      #
+      # Le port cote machine est une variable, pas une constante. Sur la machine
+      # cible c'est 3000, un des quatre ports que vm-prod publie depuis J3. Mais
+      # monter la flotte sur le poste de quelqu'un pour un essai echouait avec
+      # "address already in use" des que ce port etait pris par autre chose, et
+      # une procedure qui ne marche que sur une machine n'est pas une procedure.
+      - "${PORT_FRONT:-3000}:3000"
+    volumes:
+      # En lecture seule. Le front lit le pavillon pour le declarer dans son
+      # pouls, il n'a aucune raison de pouvoir l'ecrire. Si un jour quelqu'un se
+      # trompe de service dans une route d'ecriture, le systeme de fichiers dira
+      # non avant que la classe ne le voie.
+      - pavillon:/data:ro
+    depends_on:
+      - api
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:3000/sante', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
+
+  # --- L'API METIER -------------------------------------- Ousmane (Etat) ----
+  api:
+    image: ${REGISTRY}/${GROUPE}-api:${TAG}
+    restart: unless-stopped
+    environment:
+      TABLEAU_URL: ${TABLEAU_URL}
+      GROUPE: ${GROUPE}
+      COULEUR: ${COULEUR}
+      SERVICE: api
+      VERSION: ${TAG}
+      URL_INTERNE: http://api:3000
+      PAVILLON_FICHIER: /data/pavillon.txt
+      DB_HOST: db
+      DB_NAME: ${DB_NAME}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+    # Aucun port publie. Seul le front l'appelle, sur le reseau interne. Lui
+    # ouvrir une porte sur l'exterieur serait une surface d'attaque offerte pour
+    # rien, et ca l'empecherait au passage d'etre duplique au palier 4 : deux
+    # conteneurs ne peuvent pas ecouter le meme port de la machine.
+    volumes:
+      # En ecriture, celui-la : l'API est le seul service qui hisse le pavillon.
+      - pavillon:/data
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      # Cette sonde-la va vraiment interroger la base, contrairement a celle du
+      # Dockerfile qui reste volontairement basique. C'est elle qui fera passer
+      # le service en unhealthy quand la base tombera, et c'est ce que le job de
+      # deploiement regardera avant de declarer la flotte debout.
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:3000/sante', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
+
+  # --- LE CLASSEMENT ------------------------------------- Gabriel (Images) --
+  classement:
+    image: ${REGISTRY}/${GROUPE}-classement:${TAG}
+    restart: unless-stopped
+    environment:
+      TABLEAU_URL: ${TABLEAU_URL}
+      GROUPE: ${GROUPE}
+      COULEUR: ${COULEUR}
+      SERVICE: classement
+      VERSION: ${TAG}
+      URL_INTERNE: http://classement:3000
+      PAVILLON_FICHIER: /data/pavillon.txt
+      DB_HOST: db
+      DB_NAME: ${DB_NAME}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - pavillon:/data:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:3000/sante', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
+
+  # --- LA VIGIE ------------------------------------------ Gabriel (Images) --
+  vigie:
+    image: ${REGISTRY}/${GROUPE}-vigie:${TAG}
+    restart: unless-stopped
+    environment:
+      TABLEAU_URL: ${TABLEAU_URL}
+      GROUPE: ${GROUPE}
+      COULEUR: ${COULEUR}
+      SERVICE: vigie
+      VERSION: ${TAG}
+      URL_INTERNE: http://vigie:3000
+      PAVILLON_FICHIER: /data/pavillon.txt
+      DB_HOST: db
+      DB_NAME: ${DB_NAME}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      # Absente, la vigie demarre quand meme et se rabat sur la reserve
+      # existante. Le quiz tourne, le carre reste allume.
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+    volumes:
+      - pavillon:/data:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:3000/sante', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
+
+  # --- LA BASE -------------------------------------------- Ousmane (Etat) ---
+  db:
+    # Image officielle, epinglee, jamais reconstruite : il n'y a rien a nous
+    # dedans, donc rien a construire.
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+    volumes:
+      - donnees:/var/lib/postgresql/data
+    healthcheck:
+      # pg_isready et pas un simple test de port : le port s'ouvre plusieurs
+      # secondes avant que la base accepte reellement des requetes. Les trois
+      # services qui l'attendent partiraient trop tot.
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  # Les donnees du quiz. Elles survivent au remplacement des conteneurs, sinon
+  # chaque deploiement remettrait les scores de la classe a zero.
+  donnees:
+  # Le pavillon. C'est tout l'enjeu du palier 3 : ecrit dans le systeme de
+  # fichiers d'un conteneur, il partirait avec lui au prochain deploiement, et
+  # disparaitrait de l'ecran pile au moment ou on livre, devant toute la classe.
+  pavillon:
