@@ -61,4 +61,8 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
 
 # Forme exec et non forme shell : node devient PID 1 et recoit directement le
 # SIGTERM de docker stop, d'ou un arret propre et un carre qui s'eteint vite.
-CMD ["node", "services/classement/src/serveur.js"]
+# VOLONTAIREMENT FAUX. Ce commit sert a prouver que la pipeline sait devenir
+# rouge : le fichier n'existe pas, le conteneur sortira immediatement, et
+# l'etape de verification doit echouer plutot que d'afficher un vert qui ment.
+# Il est annule par le commit suivant.
+CMD ["node", "services/classement/src/nexistepas.js"]
