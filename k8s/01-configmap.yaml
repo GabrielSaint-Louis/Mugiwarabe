@@ -25,5 +25,5 @@ data:
   # Le chemin du battement. Le sujet fournit /api/pouls, le tableau expose
   # /api/battement : la valeur est ici pour qu'on puisse la corriger sans
   # reconstruire une image si le tableau change en cours d'apres-midi.
-  TABLEAU_CHEMIN: "/api/battement"
+  TABLEAU_CHEMIN: "/api/pulse"
   VIGIE_URL: "http://vigie"
