@@ -229,3 +229,66 @@ conteneur qu'on lui a demande d'arreter.
 
 C'est la raison pour laquelle les carres sont tenus par le cluster et non par
 `vm-prod`. Les deux deploiements fonctionnent, mais un seul survit a une attaque.
+
+
+---
+
+## 7. Le cluster sous salve
+
+La zone d'ombre notee au palier 7 : on n'avait mesure la charge que sur la
+machine cible, au repos. Voici le cluster, une fois les carres allumes.
+
+### 7.1 Ce que chaque service encaisse, deux exemplaires sauf l'API
+
+| Service | Exemplaires | Coups | Parallele | Debit | p95 |
+|---|---|---|---|---|---|
+| `api` | 1 | 5000 | 50 | 1568/s | 27 ms |
+| `api` | 1 | 5000 | 500 | 1364/s | 493 ms |
+| `classement` | 2 | 5000 | 500 | 1359/s | 527 ms |
+| `vigie` | 2 | 5000 | 500 | 1177/s | 647 ms |
+
+Aucun coup rate, a aucun niveau, sur aucun service. Et la meme lecon qu'au
+palier 4 se confirme sur le cluster : le classement a **deux** exemplaires et
+n'encaisse pas plus que l'API qui n'en a **qu'un**. La base est le goulot, elle
+n'a pas ete dupliquee, et deux fois plus de clients devant la meme base ne font
+pas deux fois plus de travail.
+
+### 7.2 Les carres pendant le feu
+
+Trois salves de 8000 coups tirees d'affilee, en surveillant le tableau toutes
+les quatre secondes pendant quatre-vingts secondes :
+
+    11:39:35   4 pleins
+    ...
+    11:40:56   4 pleins
+
+**Les quatre carres sont restes pleins du debut a la fin.** Aucun n'a pali une
+seule fois.
+
+### 7.3 Ce que cette mesure prouve, et ce qu'elle ne prouve pas
+
+Il faut etre precis, parce que la nuance est exactement ce que le sujet veut
+qu'on sache lire.
+
+La salve ci-dessus frappe `/travail` **directement**. Le vrai feu du tableau
+passe par le pouls : le tableau annonce un nombre de coups a encaisser, le pouls
+les tire lui-meme, et un carre palit quand **plus de quarante coups s'accumulent
+en retard**. On a donc mesure la capacite a absorber, pas le retard tel que le
+tableau le verra.
+
+Mais les chiffres tranchent quand meme la question :
+
+| | |
+|---|---|
+| ce que le tableau envoie au maximum | 300 coups par pouls (plafonne dans le pouls) |
+| ce que le service met a encaisser 300 coups | environ 0,2 s |
+| intervalle entre deux pouls | 5 s |
+
+Le retard se resorbe en 0,2 s la ou le pouls suivant arrive 5 s plus tard. Aucun
+retard ne peut donc s'accumuler, et le carre ne devrait jamais palir. La marge
+est d'un facteur 25, et cette fois elle est mesuree sous charge et pas au repos.
+
+Le seul cas ou ca ne tiendrait plus : si le tableau tirait sur plusieurs
+services en meme temps ET que la base saturait au point de ralentir `/travail`
+au-dela de 0,8 s par lot. On ne l'a pas observe jusqu'a 8000 coups, mais on ne
+peut pas l'exclure si toute la classe tire sur nous en meme temps.
