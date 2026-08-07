@@ -1,0 +1,206 @@
+# La pipeline de la flotte.
+#
+# Un push sur main construit les quatre images, les publie, et remplace la flotte
+# entiere sur la machine cible. Personne ne tape de commande a la main la-bas :
+# c'est la promesse du palier 2, et c'est ce qu'on verifie a chaque push.
+name: Flotte
+
+on:
+  push:
+    branches: [main]
+  # Le declenchement manuel sert au retour arriere : on rejoue le workflow sur
+  # un commit precedent, et la flotte revient a cette version.
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  # ghcr veut un chemin en minuscules, et le nom du compte ne l'est pas.
+  PREFIXE: ghcr.io/gabrielsaint-louis/mugiwarabe
+
+jobs:
+  # ---------------------------------------------------------------------------
+  #  Les quatre images, construites en parallele
+  #
+  #  Une matrice plutot que quatre jobs copies : ajouter un cinquieme service se
+  #  fera en ajoutant une ligne, pas en dupliquant trente lignes de YAML.
+  # ---------------------------------------------------------------------------
+  images:
+    name: Image ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      # fail-fast a false : si le front casse, on veut quand meme savoir si les
+      # trois autres passent. Avec le defaut, GitHub annule les autres des le
+      # premier echec, et on debogue a l'aveugle.
+      fail-fast: false
+      matrix:
+        service: [front, api, classement, vigie]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Connexion au registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          # Le jeton fourni par GitHub au job, qui meurt avec lui. Aucun mot de
+          # passe de registry a stocker en secret.
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Construction et publication
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: services/${{ matrix.service }}/Dockerfile
+          push: true
+          # Deux tags sur la meme image : le sha du commit, qui dit exactement
+          # quel code tourne, et main, qui sert de raccourci pour un depannage.
+          # Le deploiement n'utilise que le sha.
+          tags: |
+            ${{ env.PREFIXE }}-${{ matrix.service }}:${{ github.sha }}
+            ${{ env.PREFIXE }}-${{ matrix.service }}:main
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,scope=${{ matrix.service }},mode=max
+
+      - name: Taille de l'image
+        run: |
+          docker pull -q "${{ env.PREFIXE }}-${{ matrix.service }}:${{ github.sha }}"
+          TAILLE=$(docker image inspect "${{ env.PREFIXE }}-${{ matrix.service }}:${{ github.sha }}" \
+                   --format '{{.Size}}' | awk '{printf "%.0f", $1/1024/1024}')
+          echo "${{ matrix.service }} : ${TAILLE} Mo" >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  #  La livraison
+  #
+  #  Sur le runner self-hosted : c'est le seul qui atteint la machine cible. Un
+  #  runner heberge chez GitHub ne peut pas ouvrir de connexion vers un poste
+  #  sans adresse publique, et c'est le mur rencontre en J3.
+  # ---------------------------------------------------------------------------
+  livraison:
+    name: Remplacer la flotte
+    needs: [images]
+    runs-on: self-hosted
+    # Sur main uniquement. Un push sur une branche construit ses images, ce qui
+    # verifie qu'elles construisent, mais ne touche pas a la production.
+    if: github.ref == 'refs/heads/main'
+
+    env:
+      CIBLE: root@localhost
+      PORT_SSH: 2222
+      DOSSIER: /srv/flotte
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Preparer la cle de deploiement
+        run: |
+          # La cle vient des secrets et vit le temps du job. Elle n'est jamais
+          # dans le depot : un git log -p qui la ferait apparaitre, meme
+          # supprimee depuis, compte comme une fuite.
+          install -m 700 -d "$RUNNER_TEMP/ssh"
+          printf '%s\n' "${{ secrets.DEPLOY_KEY }}" > "$RUNNER_TEMP/ssh/cle"
+          chmod 600 "$RUNNER_TEMP/ssh/cle"
+          ssh-keyscan -p "$PORT_SSH" -H localhost > "$RUNNER_TEMP/ssh/known_hosts" 2>/dev/null
+
+      - name: La machine cible repond-elle
+        run: |
+          SSH="ssh -i $RUNNER_TEMP/ssh/cle -o UserKnownHostsFile=$RUNNER_TEMP/ssh/known_hosts -p $PORT_SSH"
+          # On verifie avant de livrer, pas apres. Une machine cible injoignable
+          # doit arreter la pipeline tout de suite, avec un message clair, plutot
+          # que de faire echouer une commande au milieu du remplacement.
+          $SSH "$CIBLE" 'docker version --format "Docker {{.Server.Version}} sur la cible"'
+
+      - name: Envoyer la description de la flotte
+        run: |
+          SSH="ssh -i $RUNNER_TEMP/ssh/cle -o UserKnownHostsFile=$RUNNER_TEMP/ssh/known_hosts -p $PORT_SSH"
+          $SSH "$CIBLE" "mkdir -p $DOSSIER"
+          # C'est le compose qui decrit la flotte : il part avec le reste, sinon
+          # la machine cible deploierait la version d'hier avec les images
+          # d'aujourd'hui.
+          scp -i "$RUNNER_TEMP/ssh/cle" -o UserKnownHostsFile="$RUNNER_TEMP/ssh/known_hosts" \
+              -P "$PORT_SSH" compose.prod.yml "$CIBLE:$DOSSIER/compose.prod.yml"
+
+      - name: Remplacer la flotte
+        run: |
+          SSH="ssh -i $RUNNER_TEMP/ssh/cle -o UserKnownHostsFile=$RUNNER_TEMP/ssh/known_hosts -p $PORT_SSH"
+
+          # Le .env est ecrit ici, a chaque deploiement, avec le sha du commit
+          # comme TAG. C'est ce qui garantit que la flotte tourne exactement le
+          # code de ce commit, et c'est aussi ce qui rend le retour arriere
+          # possible : rejouer le workflow sur un commit precedent reecrit ce
+          # fichier avec l'ancien sha.
+          #
+          # Il est ecrit par un heredoc cite, donc rien n'est interprete cote
+          # machine cible : un mot de passe contenant un dollar ou un guillemet
+          # ne casse pas le fichier.
+          $SSH "$CIBLE" "cat > $DOSSIER/.env" <<ENV
+          REGISTRY=ghcr.io/gabrielsaint-louis
+          GROUPE=mugiwarabe
+          TAG=${{ github.sha }}
+          COULEUR=#8B4513
+          TABLEAU_URL=${{ vars.TABLEAU_URL }}
+          PORT_FRONT=3000
+          DB_NAME=grandline
+          DB_USER=postgres
+          DB_PASSWORD=${{ secrets.DB_PASSWORD }}
+          GROQ_API_KEY=${{ secrets.GROQ_API_KEY }}
+          ENV
+
+          $SSH "$CIBLE" "chmod 600 $DOSSIER/.env"
+
+          # pull puis up -d. Les deux sont idempotents : rejouer ce job deux fois
+          # de suite ne casse rien, docker compose ne remplace que ce qui a
+          # change. C'est la meme propriete qu'en J3, sur une flotte au lieu d'un
+          # service.
+          $SSH "$CIBLE" "cd $DOSSIER && docker compose -f compose.prod.yml pull -q"
+          $SSH "$CIBLE" "cd $DOSSIER && docker compose -f compose.prod.yml up -d --remove-orphans"
+
+      - name: Verifier que la flotte est debout
+        run: |
+          SSH="ssh -i $RUNNER_TEMP/ssh/cle -o UserKnownHostsFile=$RUNNER_TEMP/ssh/known_hosts -p $PORT_SSH"
+
+          # Cette etape n'est pas decorative. Une pipeline verte qui a livre une
+          # flotte morte est pire qu'une pipeline rouge, parce qu'elle vous fait
+          # chercher ailleurs.
+          #
+          # On interroge la route de sante de chaque service, depuis l'interieur
+          # du reseau de la flotte, et on laisse trente secondes.
+          echo "| Service | Etat |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+
+          ECHECS=0
+          for SERVICE in front api classement vigie; do
+            OK=non
+            for _ in $(seq 1 15); do
+              if $SSH "$CIBLE" "cd $DOSSIER && docker compose -f compose.prod.yml exec -T $SERVICE node -e \"require('http').get('http://127.0.0.1:3000/sante', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))\"" 2>/dev/null; then
+                OK=oui
+                break
+              fi
+              sleep 2
+            done
+            if [ "$OK" = oui ]; then
+              echo "| $SERVICE | repond |" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "| $SERVICE | **ne repond pas** |" >> "$GITHUB_STEP_SUMMARY"
+              echo "::error::$SERVICE ne repond pas au bout de trente secondes"
+              ECHECS=$((ECHECS + 1))
+            fi
+          done
+
+          if [ "$ECHECS" -gt 0 ]; then
+            $SSH "$CIBLE" "cd $DOSSIER && docker compose -f compose.prod.yml ps"
+            exit 1
+          fi
+
+      - name: Ce qui tourne maintenant
+        if: always()
+        run: |
+          SSH="ssh -i $RUNNER_TEMP/ssh/cle -o UserKnownHostsFile=$RUNNER_TEMP/ssh/known_hosts -p $PORT_SSH"
+          $SSH "$CIBLE" "cd $DOSSIER && docker compose -f compose.prod.yml ps --format 'table {{.Service}}\t{{.Image}}\t{{.Status}}'"
+
+      - name: Effacer la cle
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/ssh"
