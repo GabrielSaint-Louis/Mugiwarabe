@@ -92,7 +92,7 @@ dupliquee.
 
 | Chemin | Ce qu'on y trouve |
 |---|---|
-| `partage/pouls.js` | le pouls fourni par le sujet, importe par les quatre services |
+| `partage/pouls.js` | le pouls des quatre services, sur `POST /api/pulse` depuis le 7 aout |
 | `partage/mesure.js` | un seul registre Prometheus pour les quatre |
 | `partage/pavillon.js` | la diffusion du pavillon aux services qui ne le detiennent pas |
 | `services/` | un dossier, un `Dockerfile`, une image par service |
