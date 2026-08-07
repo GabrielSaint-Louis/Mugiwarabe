@@ -89,6 +89,12 @@ carre eteint au tableau, c'est la panne 6 et rien d'autre.
 | 5 | version introuvable | un carre s'eteint et ne revient pas | le tag demande n'existe pas sur le registry | relancer le workflow sur un commit valide |
 | 6 | tableau injoignable | un carre s'eteint alors que le service va parfaitement bien | rien, sauf le chemin entre le service et le tableau | corriger `TABLEAU_URL`, relancer le workflow |
 
+**Un mot sur la reparation de la panne 3.** Remettre `/data` lisible repare la
+cause, mais le tableau garde la derniere valeur declaree jusqu'au pouls suivant :
+il y a donc jusqu'a cinq secondes ou tout est repare et ou l'ecran ment encore.
+Dites-le a voix haute pendant que vous reparez, sinon vous allez croire que la
+manoeuvre a echoue et tenter quelque chose de plus brutal.
+
 **La sixieme est la plus retorse.** Le tableau ne dit pas si votre service va
 bien, il dit **si votre service arrive a raconter qu'il va bien**. Quelqu'un qui
 ouvre l'application dans son navigateur pendant que le carre est eteint le
