@@ -1,0 +1,146 @@
+:root {
+  --bois: #8b4513;
+  --bois-clair: #a9662f;
+  --parchemin: #f6efe2;
+  --encre: #2b1d12;
+  --creme: #fffdf8;
+  --ombre: rgba(43, 29, 18, 0.14);
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 2rem 1.25rem 3rem;
+  background:
+    radial-gradient(circle at 12% -10%, #ffe9c9 0%, transparent 45%),
+    var(--parchemin);
+  color: var(--encre);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  line-height: 1.55;
+}
+
+main { max-width: 62rem; margin: 0 auto; }
+
+/* --- Le bandeau. Entierement statique : il s'affiche meme API morte. ------- */
+.pont {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  padding: 1.5rem 1.75rem;
+  border-radius: 1.25rem;
+  background: linear-gradient(135deg, var(--bois) 0%, var(--bois-clair) 100%);
+  color: var(--creme);
+  box-shadow: 0 1rem 2rem var(--ombre);
+}
+
+.luffy { height: 8.5rem; width: auto; filter: drop-shadow(0 0.5rem 0.75rem rgba(0,0,0,.3)); }
+
+.equipage {
+  margin: 0;
+  font-size: .8rem;
+  letter-spacing: .18em;
+  text-transform: uppercase;
+  opacity: .85;
+}
+
+.pont h1 { margin: .1rem 0 .35rem; font-size: clamp(2rem, 6vw, 3rem); letter-spacing: -.02em; }
+.pavillon { margin: 0; font-style: italic; font-size: 1.05rem; opacity: .95; }
+
+/* --- Le quiz. La seule zone qui depend de l'API. -------------------------- */
+.quiz {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr));
+  gap: 1.25rem;
+  margin-top: 1.5rem;
+}
+
+.carte {
+  background: var(--creme);
+  border: 1px solid rgba(139, 69, 19, .16);
+  border-radius: 1rem;
+  padding: 1.25rem 1.4rem 1.5rem;
+  box-shadow: 0 .35rem 1rem rgba(43, 29, 18, .06);
+}
+
+.carte h2 {
+  margin: 0 0 .9rem;
+  font-size: .82rem;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--bois);
+}
+
+.question { margin: 0 0 1.1rem; font-size: 1.2rem; font-weight: 600; }
+
+.propositions { list-style: none; margin: 0; padding: 0; display: grid; gap: .55rem; }
+
+.propositions button {
+  width: 100%;
+  text-align: left;
+  padding: .75rem 1rem;
+  font: inherit;
+  color: var(--encre);
+  background: var(--parchemin);
+  border: 1px solid rgba(139, 69, 19, .22);
+  border-radius: .6rem;
+  cursor: pointer;
+  transition: transform .12s ease, background .12s ease;
+}
+
+.propositions button:hover:not(:disabled) { background: #f0e2cb; transform: translateX(.2rem); }
+.propositions button:disabled { opacity: .55; cursor: default; }
+
+.juste { color: #1d6b3f; font-weight: 600; }
+.faux { color: #a3341f; font-weight: 600; }
+
+.classement { list-style: none; margin: 0; padding: 0; counter-reset: rang; }
+
+.classement li {
+  display: flex;
+  justify-content: space-between;
+  padding: .5rem 0;
+  border-bottom: 1px dashed rgba(139, 69, 19, .18);
+}
+
+.classement li::before { counter-increment: rang; content: counter(rang) "."; margin-right: .6rem; color: var(--bois); }
+.classement span:first-of-type { flex: 1; }
+.points { font-variant-numeric: tabular-nums; font-weight: 700; color: var(--bois); }
+
+/* --- Ce qui s'affiche quand ca ne repond plus ----------------------------- */
+.avertissement {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: .85rem 1.1rem;
+  border-radius: .7rem;
+  background: #fdf1d8;
+  border: 1px solid #e3b661;
+  color: #6a4a12;
+  font-weight: 600;
+}
+
+.fige {
+  margin-left: .5rem;
+  padding: .1rem .5rem;
+  font-size: .68rem;
+  letter-spacing: .08em;
+  border-radius: .5rem;
+  background: #fdf1d8;
+  color: #6a4a12;
+  border: 1px solid #e3b661;
+}
+
+.vide { color: #7a6a58; font-style: italic; margin: 0; }
+.discret { color: #8a7a68; font-size: .85rem; }
+
+footer { margin-top: 2rem; text-align: center; color: #7a6a58; font-size: .9rem; }
+footer code { background: rgba(139, 69, 19, .1); padding: .1rem .35rem; border-radius: .3rem; }
+
+@media (prefers-color-scheme: dark) {
+  :root { --parchemin: #1a130d; --creme: #241a12; --encre: #f0e4d4; }
+  body { background: radial-gradient(circle at 12% -10%, #3a2716 0%, transparent 45%), var(--parchemin); }
+  .carte { border-color: rgba(214, 160, 100, .18); }
+  .propositions button { background: #2f2218; border-color: rgba(214, 160, 100, .22); color: var(--encre); }
+  .propositions button:hover:not(:disabled) { background: #3a2a1d; }
+  .avertissement, .fige { background: #3a2c12; color: #f0d9a4; border-color: #7a5c20; }
+}

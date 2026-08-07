@@ -1,0 +1,14 @@
+{
+  "name": "mugiwarabe-flotte",
+  "version": "1.0.0",
+  "description": "La flotte de l'equipage Mugiwarabe. Ce manifeste ne decrit aucun service : il declare ce dont le code de partage/ a besoin.",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "prom-client": "15.1.3"
+  },
+  "license": "MIT"
+}
