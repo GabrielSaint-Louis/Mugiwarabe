@@ -1,0 +1,25 @@
+# Ce que la flotte sait d'elle-meme, et qui n'est pas secret.
+#
+# Separe du Secret volontairement : ces valeurs se lisent dans une pull request,
+# se comparent entre deux versions, et se corrigent sans manipuler de base64. Le
+# mot de passe, lui, n'a rien a faire ici.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: flotte
+  namespace: mugiwarabe
+data:
+  GROUPE: mugiwarabe
+  COULEUR: "#8B4513"
+  DB_HOST: db
+  DB_NAME: grandline
+  DB_USER: postgres
+  # Sur le cluster, les services se joignent par leur nom de Service, pas par le
+  # nom de conteneur du compose. Les valeurs changent, le code non : c'est tout
+  # l'interet d'avoir tout passe par des variables d'environnement des le debut.
+  API_URL: http://api
+  CLASSEMENT_URL: http://classement
+  PAVILLON_SOURCE: http://api/pavillon
+  # L'adresse du tableau. Vide tant que le formateur ne l'a pas communiquee :
+  # les services demarrent quand meme et le signalent dans leurs logs.
+  TABLEAU_URL: ""

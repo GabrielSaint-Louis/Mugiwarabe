@@ -1,0 +1,129 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: classement
+  namespace: mugiwarabe
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: classement
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # C'est ici que se joue la livraison sans extinction, et c'est tout
+      # l'interet du palier 7.
+      #
+      # maxUnavailable a 0 : le cluster n'a pas le droit de retirer un pod avant
+      # que son remplacant ne soit pret. Avec compose, up -d remplace et laisse
+      # deux secondes de trou ; ici, il n'y en a aucun.
+      #
+      # maxSurge a 1 : un pod de plus le temps de la bascule. Le prix a payer est
+      # en memoire, pas en disponibilite.
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: classement
+        # Le sha du commit, pose par la pipeline. Il sert deux fois : il est
+        # rendu au service par le champ VERSION juste en dessous, et il change
+        # a chaque livraison, ce qui suffit a declencher le rolling update meme
+        # si l'image porte le meme tag.
+        version: dev
+    spec:
+      terminationGracePeriodSeconds: 20
+      containers:
+        - name: classement
+          image: ghcr.io/gabrielsaint-louis/mugiwarabe-classement:main
+          ports:
+            - containerPort: 3000
+          envFrom:
+            - configMapRef:
+                name: flotte
+            - secretRef:
+                name: flotte
+          env:
+            - name: SERVICE
+              value: classement
+            - name: URL_INTERNE
+              value: http://127.0.0.1:3000
+            # La version que le service declarera dans son pouls vient du label
+            # du pod, pas d'une valeur ecrite en dur. Le carre au tableau
+            # affichera donc exactement ce que le cluster a deploye.
+            - name: VERSION
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['version']
+            - name: PAVILLON_FICHIER
+              value: /tmp/pavillon.txt
+          # Le detail qui separe "aucun carre ne s'eteint" de "presque".
+          #
+          # Mesure avant : rolling update avec maxUnavailable a 0, et pourtant
+          # deux sondes sans reponse. La cause n'est pas le cluster, c'est une
+          # course entre deux choses qui ne sont pas synchronisees.
+          #
+          # Quand un pod passe en Terminating, Kubernetes fait DEUX choses en
+          # parallele : il envoie SIGTERM au conteneur, et il retire le pod des
+          # Endpoints du Service. Notre process est propre, il ferme son serveur
+          # des le SIGTERM. Il est meme trop propre : il se ferme avant que
+          # Traefik n'ait fini de propager le retrait, et les quelques requetes
+          # deja routees vers lui tombent dans le vide.
+          #
+          # preStop retarde le SIGTERM de cinq secondes. Le pod continue de
+          # servir pendant que la propagation se termine, puis s'arrete
+          # tranquillement. On ne repare pas le cluster, on lui laisse le temps.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "5"]
+          # Il faut que la grace period couvre le preStop plus l'arret du
+          # serveur, sinon Kubernetes tue brutalement au milieu du sleep et on
+          # a tout fait pour rien.
+          # Les deux sondes ne repondent pas a la meme question, et les confondre
+          # est ce qui fait tomber une flotte pendant un rolling update.
+          #
+          # readiness : est-ce que ce pod peut recevoir du trafic ? Non pret, le
+          # Service le retire de ses destinations. C'est elle qui garantit
+          # qu'aucun coup ne part vers un exemplaire pas encore capable de
+          # travailler.
+          readinessProbe:
+            httpGet:
+              path: /sante
+              port: 3000
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            failureThreshold: 2
+          # liveness : est-ce que ce pod est irrecuperable et doit etre tue ?
+          # Beaucoup plus tolerante, volontairement. Une liveness trop stricte
+          # tue des pods qui allaient s'en sortir : une base momentanement
+          # injoignable ferait redemarrer toute la flotte en boucle, et on
+          # transformerait une panne courte en panne longue.
+          livenessProbe:
+            httpGet:
+              path: /sante
+              port: 3000
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: classement
+  namespace: mugiwarabe
+  labels:
+    app: classement
+spec:
+  selector:
+    app: classement
+  ports:
+    - port: 80
+      targetPort: 3000
+      name: http

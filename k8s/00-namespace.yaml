@@ -1,0 +1,12 @@
+# La flotte vit dans son propre espace de noms.
+#
+# Ce n'est pas de la coquetterie : le cluster porte encore les restes du jour 4,
+# et un `kubectl delete -f k8s/` doit pouvoir effacer la flotte sans toucher a
+# ce qui l'entoure. C'est aussi ce qui permet a un autre equipage de poser la
+# sienne a cote sans collision de noms.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mugiwarabe
+  labels:
+    equipage: mugiwarabe

@@ -233,3 +233,61 @@ arrive a le raconter". C'est une limite qu'on assume, parce qu'ajouter un
 cinquieme panneau qui surveille notre propre pouls reviendrait a surveiller le
 surveillant. La bonne reponse est le reflexe, pas le panneau : panneaux verts
 plus carre eteint, la panne est entre nous et le tableau.
+
+
+---
+
+## Sur le cluster
+
+### I-10. Le rolling update ne suffisait pas tout seul
+
+**Ce qu'on a fait** : porte la flotte sur le cluster, avec `maxUnavailable: 0`
+et `maxSurge: 1`, puis livre une nouvelle version en sondant le front deux fois
+par seconde.
+
+**Ce qu'on attendait** : zero sonde perdue. C'est la promesse de
+`maxUnavailable: 0` : aucun pod n'est retire avant que son remplacant ne soit
+pret.
+
+**Ce qui s'est passe** : deux sondes sans reponse. Mieux que les quatre de
+compose, mais pas zero.
+
+**La cause** : une course entre deux choses que Kubernetes fait **en parallele**
+quand un pod passe en `Terminating`. Il envoie `SIGTERM` au conteneur, et il
+retire le pod des Endpoints du Service. Notre process est propre, il ferme son
+serveur des le `SIGTERM`. Il est meme trop propre : il se ferme avant que Traefik
+n'ait fini de propager le retrait, et les requetes deja routees vers lui tombent
+dans le vide.
+
+**La manoeuvre** : un `preStop` de cinq secondes, plus une grace period de vingt.
+Le pod continue de servir pendant que la propagation se termine.
+
+| | Sondes | Sans reponse | Reussite |
+|---|---|---|---|
+| avant | 184 | 2 | 98,9 % |
+| apres | 171 | **0** | **100 %** |
+
+**Ce qu'on en retient** : sur le papier, la configuration etait deja correcte.
+Ce defaut ne se trouve qu'en mesurant, et il aurait ete invisible pendant une
+demonstration calme. Il ne se serait vu que pendant l'ouverture du feu, au moment
+ou la classe tire, c'est-a-dire au pire moment.
+
+### I-11. L'API est le seul service qu'on ne sait pas livrer sans interruption
+
+**Ce qu'on a constate** : l'API tourne a un seul exemplaire, en strategie
+`Recreate`, alors que les trois autres sont a deux exemplaires en rolling update.
+
+**La cause** : elle monte la PVC du pavillon, et `local-path` sur k3d ne fournit
+que du **ReadWriteOnce**. Deux pods ne peuvent pas monter le meme volume, donc
+ni replicas a deux, ni rolling update : le nouveau pod attendrait indefiniment
+un volume que l'ancien tient encore.
+
+**Ce qu'on n'a pas fait, et pourquoi** : on aurait pu deplacer le pavillon dans
+la base, ce qui aurait libere l'API de son volume. Ca marche, c'est meme la
+deuxieme ligne defendable du tableau du sujet. On ne l'a pas fait parce que ca
+deplace le probleme sans le resoudre : la base est deja le goulot mesure au
+palier 4, et lui ajouter une ecriture a chaque hissage de pavillon n'aide pas.
+
+**Ce qu'on assume** : l'API subit une interruption courte pendant une livraison,
+les trois autres non. Le front, celui que la classe regarde, est du bon cote.
+C'est une limite connue, ecrite ici et dans le README, pas un oubli.
