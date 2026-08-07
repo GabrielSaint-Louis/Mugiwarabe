@@ -1,38 +1,28 @@
-# Ce qui est liste ici n'est meme pas envoye au daemon Docker : contexte de
-# build plus leger, et aucun risque de faire fuiter un secret dans une couche.
-
-# Le piege classique : sans cette ligne, COPY . . ecrase le node_modules
-# fraichement installe par celui de l'hote, potentiellement compile pour un
-# autre OS ou une autre architecture.
-node_modules
-npm-debug.log*
+# Le contexte de build est la racine du repo, puisque les images ont besoin de
+# partage/pouls.js. Ce fichier compense : tout ce qui n'a rien a faire dans une
+# image reste dehors, et le contexte envoye au demon reste petit.
+#
+# Ce qui compte le plus ici : deploy/deploy_key. Une cle privee qui entre dans
+# un contexte de build finit dans une couche, et une couche se lit.
 
 .git
-.gitignore
 .github
+**/node_modules
+**/.next
+**/npm-debug.log*
 
-# Les secrets ne rentrent jamais dans une image, meme supprimes dans une couche
-# ulterieure : `docker history` les retrouverait.
+deploy
+k8s
+docs
+scripts
+*.md
+
 .env
 .env.*
 !.env.example
+*.pem
+deploy_key
 
-Dockerfile*
-.dockerignore
-docker-compose*.yml
-
-# Tout l'outillage de deploiement du jour 3, et surtout la cle privee qui y
-# vit. `Dockerfile*` ci-dessus ne couvre que la racine : sans cette ligne,
-# deploy/deploy_key partirait dans le contexte de build, et il suffirait d'un
-# `COPY . .` maladroit pour qu'une cle d'acces a la production se retrouve
-# dans une image publique.
-deploy
-
-# Le service Python a son propre contexte de build (stats_api/Dockerfile).
-stats_api
-
-tests
 coverage
 *.log
-*.md
 .DS_Store
