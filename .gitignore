@@ -43,3 +43,4 @@ coverage/
 # Genere par Next a la construction, jamais commite.
 .next/
 next-env.d.ts
+k8s/02-secret.yaml

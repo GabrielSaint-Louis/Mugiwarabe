@@ -1,0 +1,28 @@
+# La porte d'entree de la flotte sur le cluster.
+#
+# Un seul service est expose, le front, exactement comme sur le compose. L'API,
+# le classement et la vigie restent joignables uniquement de l'interieur : leur
+# ouvrir une porte serait une surface offerte pour rien.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: flotte
+  namespace: mugiwarabe
+spec:
+  # Traefik, installe par k3d. C'est lui qui ecoute sur le port 8080 de la
+  # machine, via le load balancer du cluster.
+  ingressClassName: traefik
+  rules:
+    # Pas de host : l'Ingress repond a n'importe quel nom d'hote. Sur un vrai
+    # cluster on nommerait le service ; ici, la machine cible n'a pas de nom DNS
+    # et exiger un Host obligerait a bricoler /etc/hosts sur chaque telephone de
+    # la classe.
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: front
+                port:
+                  number: 80

@@ -1,0 +1,84 @@
+# La base, et le seul volume qui n'a pas le droit de disparaitre.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: donnees
+  namespace: mugiwarabe
+spec:
+  # ReadWriteOnce : un seul noeud monte ce volume a la fois. C'est ce que
+  # local-path fournit sur k3d, et c'est suffisant ici puisqu'un seul pod de
+  # base l'utilise. C'est aussi la raison pour laquelle le pavillon ne passe PAS
+  # par un volume partage entre plusieurs pods.
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: db
+  namespace: mugiwarabe
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: db }
+  strategy:
+    # Recreate et pas RollingUpdate. Deux pods de base qui monteraient le meme
+    # volume ReadWriteOnce ne peuvent pas coexister, et le rolling update
+    # attendrait indefiniment que le nouveau demarre pendant que l'ancien tient
+    # le volume. C'est le genre de blocage qu'on ne comprend pas quand on le
+    # decouvre en pleine demonstration.
+    type: Recreate
+  template:
+    metadata:
+      labels: { app: db }
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              valueFrom: { configMapKeyRef: { name: flotte, key: DB_NAME } }
+            - name: POSTGRES_USER
+              valueFrom: { configMapKeyRef: { name: flotte, key: DB_USER } }
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: flotte, key: DB_PASSWORD } }
+            # L'image officielle initialise le cluster dans le repertoire monte.
+            # Sans ce sous-dossier, elle trouve le lost+found de certains
+            # volumes et refuse de demarrer sur un repertoire non vide.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: donnees
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            # pg_isready et pas un test de port : le port s'ouvre plusieurs
+            # secondes avant que la base accepte des requetes, et les trois
+            # services qui l'attendent partiraient trop tot.
+            exec: { command: ["pg_isready", "-U", "postgres", "-d", "grandline"] }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec: { command: ["pg_isready", "-U", "postgres"] }
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { memory: 512Mi }
+      volumes:
+        - name: donnees
+          persistentVolumeClaim: { claimName: donnees }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: db
+  namespace: mugiwarabe
+spec:
+  selector: { app: db }
+  ports:
+    - port: 5432
+      targetPort: 5432

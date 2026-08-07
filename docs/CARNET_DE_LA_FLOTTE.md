@@ -61,7 +61,33 @@ reste `healthy` plusieurs secondes apres avoir cesse de repondre.
 |---|---|---|---|---|
 | `up -d` **sans changement de version** | 326 | 0 | aucune | 100 % |
 | `up -d` **avec changement de version** | 384 | 4 | **environ 2 s** | 99,0 % |
-| rolling update sur le cluster | *(palier 7)* | | | |
+| rolling update, **premier essai** | 184 | 2 | environ 7 s | 98,9 % |
+| rolling update, **avec `preStop`** | 171 | **0** | **aucune** | **100 %** |
+
+C'est l'ecart le plus court a raconter de la semaine : la meme application, la
+meme image, livree deux fois. Une fois avec deux secondes de trou, une fois sans
+aucun.
+
+### Le rolling update ne suffisait pas tout seul
+
+Premier essai, avec `maxUnavailable: 0` qui promet pourtant qu'aucun pod n'est
+retire avant que son remplacant ne soit pret : **deux sondes sans reponse quand
+meme**.
+
+La cause n'est pas le cluster, c'est une course entre deux choses qui ne sont pas
+synchronisees. Quand un pod passe en `Terminating`, Kubernetes fait deux choses
+**en parallele** : il envoie `SIGTERM` au conteneur, et il retire le pod des
+Endpoints du Service. Notre process est propre, il ferme son serveur des le
+`SIGTERM`. Il est meme **trop** propre : il se ferme avant que Traefik n'ait fini
+de propager le retrait, et les quelques requetes deja routees vers lui tombent
+dans le vide.
+
+Un `preStop` de cinq secondes regle ca. Le pod continue de servir pendant que la
+propagation se termine, puis s'arrete tranquillement. On ne repare pas le
+cluster, on lui laisse le temps.
+
+C'est le genre de detail qui ne se trouve qu'en mesurant : sur le papier, la
+configuration etait deja correcte.
 
 La premiere ligne est l'idempotence : rejouer le meme deploiement ne recree
 rien, donc ne coupe rien. Les 19 questions en base etaient toujours la apres le

@@ -1,0 +1,150 @@
+# La PVC du pavillon, et le Deployment qui la monte.
+#
+# C'est tout l'enjeu du palier 3 porte sur le cluster : le volume Docker devient
+# une PersistentVolumeClaim, et la question de savoir qui la monte se pose
+# autrement.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pavillon
+  namespace: mugiwarabe
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 64Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: mugiwarabe
+spec:
+  # Un seul exemplaire, et c'est le stockage qui l'impose : la PVC du pavillon
+  # est ReadWriteOnce, donc un seul pod peut la monter. C'est exactement la
+  # limite qu'on avait anticipee en refusant le volume partage sur le compose.
+  #
+  # Consequence assumee : l'API est le seul service qui subira une courte
+  # interruption pendant une livraison. Les trois autres n'en subissent aucune,
+  # et le front, celui que la classe regarde, est du bon cote.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: api
+  strategy:
+    # Recreate, pour la meme raison que la base : deux pods ne peuvent pas monter
+    # la meme PVC ReadWriteOnce, et un rolling update attendrait indefiniment que
+    # le nouveau demarre pendant que l'ancien tient le volume.
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: api
+        # Le sha du commit, pose par la pipeline. Il sert deux fois : il est
+        # rendu au service par le champ VERSION juste en dessous, et il change
+        # a chaque livraison, ce qui suffit a declencher le rolling update meme
+        # si l'image porte le meme tag.
+        version: dev
+    spec:
+      terminationGracePeriodSeconds: 20
+      containers:
+        - name: api
+          image: ghcr.io/gabrielsaint-louis/mugiwarabe-api:main
+          ports:
+            - containerPort: 3000
+          envFrom:
+            - configMapRef:
+                name: flotte
+            - secretRef:
+                name: flotte
+          env:
+            - name: SERVICE
+              value: api
+            - name: URL_INTERNE
+              value: http://127.0.0.1:3000
+            # La version que le service declarera dans son pouls vient du label
+            # du pod, pas d'une valeur ecrite en dur. Le carre au tableau
+            # affichera donc exactement ce que le cluster a deploye.
+            - name: VERSION
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['version']
+            - name: PAVILLON_FICHIER
+              value: /data/pavillon.txt
+          volumeMounts:
+            - name: pavillon
+              mountPath: /data
+          # Le detail qui separe "aucun carre ne s'eteint" de "presque".
+          #
+          # Mesure avant : rolling update avec maxUnavailable a 0, et pourtant
+          # deux sondes sans reponse. La cause n'est pas le cluster, c'est une
+          # course entre deux choses qui ne sont pas synchronisees.
+          #
+          # Quand un pod passe en Terminating, Kubernetes fait DEUX choses en
+          # parallele : il envoie SIGTERM au conteneur, et il retire le pod des
+          # Endpoints du Service. Notre process est propre, il ferme son serveur
+          # des le SIGTERM. Il est meme trop propre : il se ferme avant que
+          # Traefik n'ait fini de propager le retrait, et les quelques requetes
+          # deja routees vers lui tombent dans le vide.
+          #
+          # preStop retarde le SIGTERM de cinq secondes. Le pod continue de
+          # servir pendant que la propagation se termine, puis s'arrete
+          # tranquillement. On ne repare pas le cluster, on lui laisse le temps.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "5"]
+          # Il faut que la grace period couvre le preStop plus l'arret du
+          # serveur, sinon Kubernetes tue brutalement au milieu du sleep et on
+          # a tout fait pour rien.
+          # Les deux sondes ne repondent pas a la meme question, et les confondre
+          # est ce qui fait tomber une flotte pendant un rolling update.
+          #
+          # readiness : est-ce que ce pod peut recevoir du trafic ? Non pret, le
+          # Service le retire de ses destinations. C'est elle qui garantit
+          # qu'aucun coup ne part vers un exemplaire pas encore capable de
+          # travailler.
+          readinessProbe:
+            httpGet:
+              path: /sante
+              port: 3000
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            failureThreshold: 2
+          # liveness : est-ce que ce pod est irrecuperable et doit etre tue ?
+          # Beaucoup plus tolerante, volontairement. Une liveness trop stricte
+          # tue des pods qui allaient s'en sortir : une base momentanement
+          # injoignable ferait redemarrer toute la flotte en boucle, et on
+          # transformerait une panne courte en panne longue.
+          livenessProbe:
+            httpGet:
+              path: /sante
+              port: 3000
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+      volumes:
+        - name: pavillon
+          persistentVolumeClaim:
+            claimName: pavillon
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  namespace: mugiwarabe
+  labels:
+    app: api
+spec:
+  selector:
+    app: api
+  ports:
+    - port: 80
+      targetPort: 3000
+      name: http
