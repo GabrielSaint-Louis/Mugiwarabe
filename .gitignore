@@ -39,3 +39,7 @@ kubeconfig
 coverage/
 *.log
 .DS_Store
+
+# Genere par Next a la construction, jamais commite.
+.next/
+next-env.d.ts
